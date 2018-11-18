@@ -8,7 +8,7 @@ from collections import namedtuple
 import requests
 from selenium import webdriver
 
-import qzone_login
+# import qzone_login
 from io_in_out import *
 
 curpath = os.path.dirname(os.path.realpath(__file__))
@@ -179,10 +179,38 @@ class QzonePhotoManager(object):
 
         self.cookie = cookiess
         self.session = ""
-        self.qzone_g_tk = qzone_login.getGTK(skey)
+        self.qzone_g_tk = self.getGTK(skey)
 
         driver.close()
         driver.quit()
+
+    # -----------------
+    # 计算 g_tk
+    # -----------------
+    def utf8_unicode(self, c):
+        if len(c) == 1:
+            return ord(c)
+        elif len(c) == 2:
+            n = (ord(c[0]) & 0x3f) << 6
+            n += ord(c[1]) & 0x3f
+            return n
+        elif len(c) == 3:
+            n = (ord(c[0]) & 0x1f) << 12
+            n += (ord(c[1]) & 0x3f) << 6
+            n += ord(c[2]) & 0x3f
+            return n
+        else:
+            n = (ord(c[0]) & 0x0f) << 18
+            n += (ord(c[1]) & 0x3f) << 12
+            n += (ord(c[2]) & 0x3f) << 6
+            n += ord(c[3]) & 0x3f
+            return n
+
+    def getGTK(self, skey):
+        hash = 5381
+        for i in range(0, len(skey)):
+            hash += (hash << 5) + self.utf8_unicode(skey[i])
+        return hash & 0x7fffffff
 
     def access_net_v3(self, url, timeout):
         '''
