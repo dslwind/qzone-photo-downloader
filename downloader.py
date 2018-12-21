@@ -255,11 +255,12 @@ class QzonePhotoManager(object):
         # print(url)
         c = self.access_net_v3(url, timeout=10)
         # print(c)
-
+        photolist=[]
         if c:
             c = json.loads(c)
+            #print(c)
             if 'data' in c and 'photoList' in c['data']:
-                photolist = c['data']['photoList']
+                photolist.append(c['data']['photoList'])
 
                 # 先看是否存在原图
                 # get picKey(=lloc)
@@ -268,12 +269,15 @@ class QzonePhotoManager(object):
                         dest_user, album, photolist[0]['lloc'])
                     if p:
                         return p
+                pic_url=[]
                 for i in photolist:
-                    pic_url = (
-                        'origin_url' in i and i['origin_url'] or i['url'])
-                    photos.append(QzonePhoto._make([
-                        pic_url, i['name'], album
-                    ]))
+                    for j in i:
+                        pic_url=j['url']
+                        name=j['name']
+                        #'origin_url' in i and i['origin_url'] or 
+                        photos.append(QzonePhoto._make([
+                            pic_url,name,album
+                        ]))                        
         return photos
 
     def get_raw_photos_by_album(self, dest_user, album, pic_key):
@@ -349,11 +353,11 @@ class QzonePhotoManager(object):
 
 def entry():
     # 你的 QQ和密码，QQ号必须写，密码可以省略，然后使用网页快速登录功能
-    main_user = 123456
+    main_user = ''
     main_pass = ''
 
     # 要处理的目标 QQ 号，此处可填入多个QQ号，中间用逗号隔开
-    dest_users = [123456, ]
+    dest_users = []
 
     a = QzonePhotoManager(main_user, main_pass)
     io_print(u'登录成功')
