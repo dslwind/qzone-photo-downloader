@@ -27,18 +27,18 @@ def entry():
 ```
 按程序注释修改你的QQ号和目标QQ号（可以是好友的），然后保存运行即可开始下载。
 
-问题1：
+# 问题1：
 python:3.6.6运行，调出chrome后，还没输入完账号密码登陆就提示这个错误
 selenium.common.exceptions.ElementNotVisibleException: Message: element not interactable
 
-解决方案：
+# 解决方案：
 这个问题我估计是time.sleep(3)这个暂停时间过短了，导致手动输入还没人完成，driver拿不到数据所以报错了，后来我用手机扫码，，没有遇到了。
 
-问题2
+# 问题2
 photolis这个参数始终显示None
 
-解决方案：
+# 解决方案：
 我看获取获取的json数据，直接赋给photolist他是list中嵌套字典，所以我做了两层嵌套把json中的单个照片的数据抠出来，然后下载。
 
-另外：
+# 另外：
 还有一个问题是不能又空相册，不然仍然会遇到photolist为空的问题
