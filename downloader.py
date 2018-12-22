@@ -272,9 +272,8 @@ class QzonePhotoManager(object):
                 pic_url=[]
                 for i in photolist:
                     for j in i:
-                        pic_url=j['url']
+                        pic_url='origin_url' in j and j['origin_url'] or j['url']
                         name=j['name']
-                        #'origin_url' in i and i['origin_url'] or 
                         photos.append(QzonePhoto._make([
                             pic_url,name,album
                         ]))                        
