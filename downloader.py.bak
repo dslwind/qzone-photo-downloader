@@ -8,6 +8,7 @@ from collections import namedtuple
 import requests
 from selenium import webdriver
 
+# import qzone_login
 from io_in_out import *
 
 curpath = os.path.dirname(os.path.realpath(__file__))
@@ -62,11 +63,10 @@ def func_save_photo(arg):
 
     fn = u'{0}_{1}.jpeg'.format(index, photo.name)
 
-    print("正在下载相册 {0} 的第 {1} 张图片".format(album_name, index + 1))
+    print("正在下载相册 {0} 的第 {1} 张图片".format(album_name, index+1))
 
-    def _func_replace_os_path_sep(x):
-        return x.replace(u'/', u'_').replace(u'\\', u'_')
-
+    def _func_replace_os_path_sep(x): return x.replace(
+        u'/', u'_').replace(u'\\', u'_')
     fn = _func_replace_os_path_sep(fn)
     c_p = os.path.join(dest_path, fn)
     if not io_is_path_valid(c_p):
@@ -84,8 +84,7 @@ def func_save_photo(arg):
         try:
             req = func_save_photo_net_helper(session, url, timeout)
             break
-        except (requests.exceptions.ReadTimeout,
-                requests.exceptions.ConnectionError):
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
             attempts += 1
             timeout += 5
     else:
@@ -101,32 +100,37 @@ class QzonePhotoManager(object):
     """
     查询QQ空间相册并下载的类。
     """
+    albumbase1 = "http://alist.photo.qq.com/fcgi-bin/fcg_list_album?uin={0}&outstyle=2"  # 如果没有设置密保的相册是通过这个地址访问的
 
-    # 相册列表
-    albumbase = (
-        'https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?'
+    # 2017.02.10 测试: 不对的，已经失效了，效果跟 albumbase1 一样，无法访问密保相册
+    # albumbase2 = "http://xalist.photo.qq.com/fcgi-bin/fcg_list_album?uin=" # 设置密保的相册是通过这个地址访问的
+
+    albumbase = albumbase1
+    photobase1 = 'http://plist.photo.qq.com/fcgi-bin/fcg_list_photo?uin={0}&albumid={1}&outstyle=json'
+    # photobase2 = "http://xaplist.photo.qq.com/fcgi-bin/fcg_list_photo?uin="
+    photobase = photobase1
+
+    # v3 的地址都是用过 Chrome 开发者模式查看的
+    albumbase_v3 = (
+        'https://h5.qzone.qq.com/proxy/domain/tjalist.photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?'
         'g_tk={gtk}&t={t}&hostUin={dest_user}&uin={user}'
-        '&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp'
-        '&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1'
-        '&idcNum=4&callbackFun=shine0&callback=shine0_Callback')
+        '&appid=4&inCharset=gbk&outCharset=gbk&source=qzone&plat=qzone&format=jsonp&callbackFun=&mode=3')
 
-    # 照片列表
-    photobase = (
-        'https://h5.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/'
-        'cgi_list_photo?g_tk={gtk}&t={t}&mode=0&idcNum=4&hostUin={dest_user}'
-        '&topicId={album_id}&noTopic=0&uin={user}&pageStart=0&pageNum=9999'
-        '&skipCmtCount=0&singleurl=1&batchId=&notice=0&appid=4&inCharset=utf-8&outCharset=utf-8'
-        '&source=qzone&plat=qzone&outstyle=json&format=jsonp&json_esc=1&question=&answer='
-        '&callbackFun=shine0&callback=shine0_Callback')
+    # 不是原图质量
+    photobase_v3 = ('https://h5.qzone.qq.com/proxy/domain/tjplist.photo.qzone.qq.com/fcgi-bin/'
+                    'cgi_list_photo?g_tk={gtk}&t={t}&mode=0&idcNum=5&hostUin={dest_user}'
+                    '&topicId={album_id}&noTopic=0&uin={user}&pageStart=0&pageNum=9000'
+                    '&inCharset=gbk&outCharset=gbk'
+                    '&source=qzone&plat=qzone&outstyle=json&format=jsonp&json_esc=1')
 
     def __init__(self, user, password):
         self.user = user
         self.password = password
 
-        driver = webdriver.Chrome('./chromedriver')
+        driver = webdriver.Chrome()
         # 使用 get() 方法打开待抓取的 URL
         driver.get('http://user.qzone.qq.com')
-        time.sleep(15)
+        time.sleep(5)
         # 等待 5 秒后，判断页面是否需要登录，通过查找页面是否有相应的 DIV 的 id 来判断
         try:
             driver.find_element_by_id('login_div')
@@ -157,14 +161,25 @@ class QzonePhotoManager(object):
 
         # 尝试一下获取 Cookie，使用 get_cookies()
         cookies = driver.get_cookies()
-        # print(cookies)
+        cookie_dict = []
+        # 初始化 cookies 字典变量
+        cookiess = {}
+        skey = ""
+        for c in cookies:
+            ck = "{0}={1};".format(c['name'], c['value'])
+            cookiess[c['name']] = c['value']
+            cookie_dict.append(ck)
+            # print("ck: " + ck)
+            if c['name'] == "skey":
+                skey = c['value']
+        i = ''
+        for c in cookie_dict:
+            i += c
+        print('Cookies:', i)
 
-        cookies_dict = {}
-        cookies_dict = {c['name']: c['value'] for c in cookies}
-
-        self.cookie = cookies_dict
+        self.cookie = cookiess
         self.session = ""
-        self.qzone_g_tk = self.calc_g_tk(cookies_dict['p_skey'])
+        self.qzone_g_tk = self.getGTK(skey)
 
         driver.close()
         driver.quit()
@@ -172,69 +187,128 @@ class QzonePhotoManager(object):
     # -----------------
     # 计算 g_tk
     # -----------------
-    def calc_g_tk(self, p_skey):
-        t = 5381
-        for c in p_skey:
-            t += (t << 5) + ord(c)
-        return t & 2147483647
+    def utf8_unicode(self, c):
+        if len(c) == 1:
+            return ord(c)
+        elif len(c) == 2:
+            n = (ord(c[0]) & 0x3f) << 6
+            n += ord(c[1]) & 0x3f
+            return n
+        elif len(c) == 3:
+            n = (ord(c[0]) & 0x1f) << 12
+            n += (ord(c[1]) & 0x3f) << 6
+            n += ord(c[2]) & 0x3f
+            return n
+        else:
+            n = (ord(c[0]) & 0x0f) << 18
+            n += (ord(c[1]) & 0x3f) << 12
+            n += (ord(c[2]) & 0x3f) << 6
+            n += ord(c[3]) & 0x3f
+            return n
 
-    def access_net(self, url, timeout):
+    def getGTK(self, skey):
+        hash = 5381
+        for i in range(0, len(skey)):
+            hash += (hash << 5) + self.utf8_unicode(skey[i])
+        return hash & 0x7fffffff
+
+    def access_net_v3(self, url, timeout):
         '''
         使用登录时的 session，cookie 访问网络 ，适用于高版本的 qzone api
         '''
         r = requests.get(url, cookies=self.cookie, timeout=timeout)
         # r = self.session.get(url, timeout=timeout)
         c = r.text
-        c = c.replace('shine0_Callback(', '').replace(');', '')
-        # print(c)
+        c = c.replace('_Callback(', '').replace(');', '')
         return c
 
-    def get_albums(self, dest_user):
+    def get_albums_v3(self, dest_user):
         import json
         albums = []
-        url = self.albumbase.format(gtk=self.qzone_g_tk,
-                                    t=random.Random().random(),
-                                    dest_user=dest_user,
-                                    user=self.user)
+        url = self.albumbase_v3.format(gtk=self.qzone_g_tk,
+                                       t=random.Random().random(),
+                                       dest_user=dest_user,
+                                       user=self.user)
         # print(url)
-        c = self.access_net(url, timeout=8)
+        c = self.access_net_v3(url, timeout=8)
         if c:
             c = json.loads(c)
-            if ('data' in c) and ('albumListModeSort' in c['data']):
-                for i in c['data']['albumListModeSort']:
-                    albums.append(
-                        QzoneAlbum._make([i['id'], i['name'], i['total']]))
+            if ('data' in c) and ('albumListModeClass' in c['data']):
+                for j in c['data']['albumListModeClass']:
+                    if 'albumList' in j:
+                        for i in j['albumList']:
+                            albums.append(QzoneAlbum._make(
+                                [i['id'], i['name'], i['total']]))
         # print(albums)
         return albums
 
-    def get_photos_by_album(self, dest_user, album):
+    def get_photos_by_album_v3(self, dest_user, album):
         import json
 
         photos = []
-        url = self.photobase.format(gtk=self.qzone_g_tk,
-                                    t=random.Random().random(),
-                                    dest_user=dest_user,
-                                    user=self.user,
-                                    album_id=album.uid)
-        print(url)
-        c = self.access_net(url, timeout=10)
-        print(c)
+        url = self.photobase_v3.format(
+            gtk=self.qzone_g_tk,
+            t=random.Random().random(),
+            dest_user=dest_user,
+            user=self.user,
+            album_id=album.uid)
+        # print(url)
+        c = self.access_net_v3(url, timeout=10)
+        # print(c)
 
         if c:
             c = json.loads(c)
             if 'data' in c and 'photoList' in c['data']:
                 photolist = c['data']['photoList']
 
+                # 先看是否存在原图
+                # get picKey(=lloc)
+                if photolist and 'lloc' in photolist[0]:
+                    p = self.get_raw_photos_by_album(
+                        dest_user, album, photolist[0]['lloc'])
+                    if p:
+                        return p
                 for i in photolist:
-                    if i['raw']:
-                        pic_url = i['raw']
-                    else:
-                        pic_url = i['url']
-                    photos.append(QzonePhoto._make([pic_url, i['name'],
-                                                    album]))
+                    pic_url = (
+                        'origin_url' in i and i['origin_url'] or i['url'])
+                    photos.append(QzonePhoto._make([
+                        pic_url, i['name'], album
+                    ]))
         return photos
 
-    def get_photos(self, dest_user):
+    def get_raw_photos_by_album(self, dest_user, album, pic_key):
+        import json
+
+        url_raw_photo_base = ('https://h5.qzone.qq.com/proxy/domain/tjplist.photo.qq.com/fcgi-bin/'
+                              'cgi_floatview_photo_list_v2?'
+                              'g_tk={gtk}&t={t}&topicId={album_id}&picKey={pic_key}'
+                              '&shootTime=&cmtOrder=1&fupdate=1&plat=qzone&source=qzone'
+                              '&cmtNum=10&inCharset=utf-8&outCharset=utf-8'
+                              '&offset=0&uin={user}&appid=4&isFirst=1&hostUin={dest_user}&postNum=9999')
+
+        photos = []
+        url = url_raw_photo_base.format(
+            gtk=self.qzone_g_tk,
+            t=random.Random().random(),
+            dest_user=dest_user,
+            user=self.user,
+            album_id=album.uid,
+            pic_key=pic_key)
+
+        c = self.access_net_v3(url, timeout=10)
+        if c:
+            c = json.loads(c)
+            if 'data' in c and 'photos' in c['data']:
+                for i in c['data']['photos']:
+                    pic_url = ('raw' in i and i['raw']
+                               or 'origin' in i and i['origin']
+                               or i['url'])
+                    photos.append(QzonePhoto._make([
+                        pic_url, i['name'], album
+                    ]))
+        return photos
+
+    def get_photos_v3(self, dest_user):
         '''
         能访问所有相册, 前提是先有权限访问该相册
         :param dest_user:
@@ -243,7 +317,7 @@ class QzonePhotoManager(object):
         from concurrent.futures import ThreadPoolExecutor
 
         # 先获得所有相册
-        albums = self.get_albums(dest_user)
+        albums = self.get_albums_v3(dest_user)
         photos_all = []
         io_print(u'获取到 {0} 个相册'.format(len(albums)))
 
@@ -255,7 +329,7 @@ class QzonePhotoManager(object):
 
         for i, album in enumerate(albums):
             # 根据相册 id 获取相册内所有照片
-            photos = self.get_photos_by_album(dest_user, album)
+            photos = self.get_photos_by_album_v3(dest_user, album)
             photos = [(self.session, dest_user, i, album.name, si, photo)
                       for si, photo in enumerate(photos)]
 
@@ -279,9 +353,7 @@ def entry():
     main_pass = ''
 
     # 要处理的目标 QQ 号，此处可填入多个QQ号，中间用逗号隔开
-    dest_users = [
-        123456,
-    ]
+    dest_users = [123456, ]
 
     a = QzonePhotoManager(main_user, main_pass)
     io_print(u'登录成功')
@@ -289,7 +361,7 @@ def entry():
     # 如果遇到下载失败的，产生超时异常终止程序运行的，可以再重新运行，已经下载过的文件不会重新下载
     for e in dest_users:
         io_print(u'正在处理用户 {0}'.format(e))
-        a.get_photos(e)
+        a.get_photos_v3(e)
         io_print(u'处理完成')
 
 

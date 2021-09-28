@@ -1,3 +1,5 @@
 __pycache__/
+.venv/
 qzone_photo/
-chromedriver.exe
+chromedriver*
+.DS_Store
