@@ -1,13 +1,15 @@
 # QQ 空间照片下载器
 
-## 更新说明 
+## 更新说明
 
-2021.09.28更新
+2021.09.28 更新
 
 已更新代码，目前已经能够导出相册，欢迎下载使用。
 
 ### 使用方法
+
 - 克隆
+
   ```shell
   git clone https://github.com/dslwind/qzone-photo-downloader.git
   cd qzone-photo-downloader
@@ -23,7 +25,7 @@
 
 - [chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads)
 
-- 修改QQ号
+- 修改 QQ 号
 
   打开`downloader.py`，定位到以下代码
 
@@ -39,15 +41,13 @@
 
 2021.09.16 更新说明
 
-已经通过Chrome开发者工具获得新的相册列表和图片列表，过几天更新代码
+已经通过 Chrome 开发者工具获得新的相册列表和图片列表，过几天更新代码
 
 2021.05.29 更新说明
 
 这个脚本写于 2018 年，当初是为了方便从好友的 QQ 空间相册下载原图，没想到陆陆续续收到了二十多个 Star，现在测试该方法已经失效了。
 
 推荐使用其他 GitHub 项目（例如[QQzoneExporter](https://github.com/wwwpf/QzoneExporter)）代替。
-
----分割线---
 
 ## 旧版说明：
 
