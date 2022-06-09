@@ -126,7 +126,7 @@ class QzonePhotoManager(object):
     photobase = (
         'https://h5.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/'
         'cgi_list_photo?g_tk={gtk}&t={t}&mode=0&idcNum=4&hostUin={dest_user}'
-        '&topicId={album_id}&noTopic=0&uin={user}&pageStart=0&pageNum=9999'
+        '&topicId={album_id}&noTopic=0&uin={user}&pageStart={pageStart}&pageNum={pageNum}'
         '&skipCmtCount=0&singleurl=1&batchId=&notice=0&appid=4&inCharset=utf-8&outCharset=utf-8'
         '&source=qzone&plat=qzone&outstyle=json&format=jsonp&json_esc=1&question=&answer='
         '&callbackFun=shine0&callback=shine0_Callback')
@@ -226,30 +226,53 @@ class QzonePhotoManager(object):
         import json
 
         photos = []
-        url = self.photobase.format(gtk=self.qzone_g_tk,
-                                    t=random.Random().random(),
-                                    dest_user=dest_user,
-                                    user=self.user,
-                                    album_id=album.uid)
-        if app_config['is_api_debug']:
-            print(url)
-        c = self.access_net(url, timeout=app_config['timeout_init'])
-        if app_config['is_api_debug']:
-            print(c)
+        pageStart = 0
+        pageNum = 500   # 接口最多返回 500 条照片
+        totalInAlbum = 0  # 总照片数量
+        totalInPage = 0  # 当次分页拿到了多少张照片
 
-        if c:
-            c = json.loads(c)
-            if 'data' in c and 'photoList' in c['data']:
-                photolist = c['data']['photoList']
-                if photolist is None:
-                    return photos
-                for i in photolist:
-                    if i['raw']:
-                        pic_url = i['raw']
-                    else:
-                        pic_url = i['url']
-                    photos.append(QzonePhoto._make([pic_url, i['name'],
-                                                    album]))
+        while True:
+            url = self.photobase.format(gtk=self.qzone_g_tk,
+                                        t=random.Random().random(),
+                                        dest_user=dest_user,
+                                        user=self.user,
+                                        album_id=album.uid,
+                                        pageStart=pageStart,
+                                        pageNum=pageNum
+                                        )
+            if app_config['is_api_debug']:
+                print(url)
+            c = self.access_net(url, timeout=app_config['timeout_init'])
+            if app_config['is_api_debug']:
+                print(c)
+
+            if c:
+                c = json.loads(c)
+                if 'data' in c:
+                    totalInAlbum = c['data']['totalInAlbum']
+                    totalInPage = c['data']['totalInPage']
+                    if totalInAlbum == 0:  # 该相册没有照片
+                        return photos
+                    if totalInPage == 0:  # 当次请求没有获取到照片，也就说明到了最后的页数
+                        return photos
+
+                    if 'photoList' in c['data']:
+                        photolist = c['data']['photoList']
+                        if photolist is None:
+                            return photos
+                        for i in photolist:
+                            if i['raw']:
+                                pic_url = i['raw']
+                            else:
+                                pic_url = i['url']
+                            photos.append(QzonePhoto._make([pic_url, i['name'], album]))
+                    # 如果第一次总数就已经是获取到的数量，就说明只有第一页，不需要继续下一页
+                    if totalInAlbum == totalInPage:
+                        return photos
+                    # 下一页的请求参数
+                    pageStart = pageStart + totalInPage
+
+
         return photos
 
     def get_photos(self, dest_user):
