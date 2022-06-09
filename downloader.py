@@ -14,7 +14,7 @@ curpath = os.path.dirname(os.path.realpath(__file__))
 curpath = io_in_arg(curpath)
 
 QzoneAlbum = namedtuple('QzoneAlbum', ['uid', 'name', 'count'])
-QzonePhoto = namedtuple('QzonePhoto', ['url', 'name', 'album'])
+QzonePhoto = namedtuple('QzonePhoto', ['url', 'name', 'album', 'is_video'])
 
 app_config = {
     "max_workers": 20,  # 并行下载线程数量
@@ -67,8 +67,9 @@ def func_save_photo(arg):
     dest_path = os.path.join(func_save_dir(user), album_name.strip())
     # if not os.path.exists(dest_path):
     #     os.makedirs(dest_path)
-
     fn = u'{0}_{1}.jpeg'.format(index, photo.name)
+    if photo.is_video:
+        fn = u'{0}_{1}_视频缩略图.jpeg'.format(index, photo.name)
 
     print("[开始下载] 相册 {0} 的第 {1} 张图片".format(album_name, index + 1))
 
@@ -227,7 +228,7 @@ class QzonePhotoManager(object):
 
         photos = []
         pageStart = 0
-        pageNum = 500   # 接口最多返回 500 条照片
+        pageNum = 500  # 接口最多返回 500 条照片
         totalInAlbum = 0  # 总照片数量
         totalInPage = 0  # 当次分页拿到了多少张照片
 
@@ -265,13 +266,12 @@ class QzonePhotoManager(object):
                                 pic_url = i['raw']
                             else:
                                 pic_url = i['url']
-                            photos.append(QzonePhoto._make([pic_url, i['name'], album]))
+                            photos.append(QzonePhoto._make([pic_url, i['name'], album, i['is_video']]))
                     # 如果第一次总数就已经是获取到的数量，就说明只有第一页，不需要继续下一页
                     if totalInAlbum == totalInPage:
                         return photos
                     # 下一页的请求参数
                     pageStart = pageStart + totalInPage
-
 
         return photos
 
@@ -341,9 +341,7 @@ def entry():
     app_config["max_attempts"] = 10  # 下载失败后最大重试次数
     app_config["is_api_debug"] = False  # 是否打印 API 的响应结果，在调试的时候使用
     app_config["executionQzoneAlbums"] = [
-        '婚纱-精修-20190924-第一版',
-        '婚纱-115张精修底片'
-    ]  # 排除不下载的相册名称
+    ]  # 排除不下载的相册名称，多个用逗号分隔，比如 'a','b'
 
     # 如果遇到下载失败的，产生超时异常终止程序运行的，可以再重新运行，已经下载过的文件不会重新下载
     for e in dest_users:
