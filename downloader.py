@@ -16,6 +16,14 @@ curpath = io_in_arg(curpath)
 QzoneAlbum = namedtuple('QzoneAlbum', ['uid', 'name', 'count'])
 QzonePhoto = namedtuple('QzonePhoto', ['url', 'name', 'album'])
 
+app_config = {
+    "max_workers": 20,  # 并行下载线程数量
+    "timeout_init": 10,  # 初始超时时间，可以调整大一点，防止某些照片过大，响应太慢
+    "max_attempts": 10,  # 下载失败后最大重试次数
+    "is_api_debug": 10,  # 是否打印 API 的响应结果，调试的时候使用
+    "executionQzoneAlbums": []  # 要排除的相册名称
+}
+
 
 def func_save_dir(user):
     '''
@@ -62,7 +70,7 @@ def func_save_photo(arg):
 
     fn = u'{0}_{1}.jpeg'.format(index, photo.name)
 
-    print("正在下载相册 {0} 的第 {1} 张图片".format(album_name, index + 1))
+    print("[开始下载] 相册 {0} 的第 {1} 张图片".format(album_name, index + 1))
 
     def _func_replace_os_path_sep(x):
         return x.replace(u'/', u'_').replace(u'\\', u'_')
@@ -75,19 +83,23 @@ def func_save_photo(arg):
 
     # 可能使用其他 api 下载过文件就不再下载
     if os.path.exists(c_p):
+        print("[本地已存在] 相册 {0} 的第 {1} 张图片".format(album_name, index + 1))
         return
 
     url = photo.url.replace('\\', '')
+    max_attempts = app_config['max_attempts']
     attempts = 0
-    timeout = 10
-    while attempts < 10:
+    timeout = app_config['timeout_init']
+    while attempts < max_attempts:
         try:
             req = func_save_photo_net_helper(session, url, timeout)
+            print("[下载成功] 相册 {0} 的第 {1} 张图片；当前重试进度 {2}/10,超时时间 {3}".format(album_name, index + 1, attempts, timeout))
             break
         except (requests.exceptions.ReadTimeout,
                 requests.exceptions.ConnectionError):
             attempts += 1
             timeout += 5
+            print("[重试下载] 相册 {0} 的第 {1} 张图片；当前重试进度 {2}/10,超时时间 {3}".format(album_name, index + 1, attempts, timeout))
     else:
         io_print(u'down fail user:{0} {1}'.format(user, photo.url))
         return
@@ -196,15 +208,18 @@ class QzonePhotoManager(object):
                                     t=random.Random().random(),
                                     dest_user=dest_user,
                                     user=self.user)
-        # print(url)
+        if app_config['is_api_debug']:
+            print(url)
         c = self.access_net(url, timeout=8)
         if c:
             c = json.loads(c)
-            if ('data' in c) and ('albumListModeSort' in c['data']):
-                for i in c['data']['albumListModeSort']:
-                    albums.append(
-                        QzoneAlbum._make([i['id'], i['name'], i['total']]))
-        # print(albums)
+            if ('data' in c) and ('albumListModeClass' in c['data']):
+                for i in c['data']['albumListModeClass']:
+                    for ii in i['albumList']:
+                        albums.append(
+                            QzoneAlbum._make([ii['id'], ii['name'], ii['total']]))
+        if app_config['is_api_debug']:
+            print(albums)
         return albums
 
     def get_photos_by_album(self, dest_user, album):
@@ -216,15 +231,18 @@ class QzonePhotoManager(object):
                                     dest_user=dest_user,
                                     user=self.user,
                                     album_id=album.uid)
-        print(url)
-        c = self.access_net(url, timeout=10)
-        print(c)
+        if app_config['is_api_debug']:
+            print(url)
+        c = self.access_net(url, timeout=app_config['timeout_init'])
+        if app_config['is_api_debug']:
+            print(c)
 
         if c:
             c = json.loads(c)
             if 'data' in c and 'photoList' in c['data']:
                 photolist = c['data']['photoList']
-
+                if photolist is None:
+                    return photos
                 for i in photolist:
                     if i['raw']:
                         pic_url = i['raw']
@@ -248,12 +266,16 @@ class QzonePhotoManager(object):
         io_print(u'获取到 {0} 个相册'.format(len(albums)))
 
         for i in range(len(albums)):
-            print(albums[i].name)
+            print(f'        {albums[i].name}')
+
             dest_path = os.path.join(func_save_dir(dest_user), albums[i].name)
             if not os.path.exists(dest_path):
                 os.makedirs(dest_path)
 
         for i, album in enumerate(albums):
+            if album.name in app_config["executionQzoneAlbums"]:
+                print(f'该相册排除不下载： {album.name}')
+                continue
             # 根据相册 id 获取相册内所有照片
             photos = self.get_photos_by_album(dest_user, album)
             photos = [(self.session, dest_user, i, album.name, si, photo)
@@ -265,7 +287,9 @@ class QzonePhotoManager(object):
                 os.makedirs(p)
             photos_all.extend(photos)
 
-        with ThreadPoolExecutor(max_workers=20) as pool:
+        max_workers = app_config['max_workers']
+        print(f'启用多线程下载，并行下载线程数量为 {max_workers}')
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             r = pool.map(func_save_photo, photos_all)
             list(r)
 
@@ -285,6 +309,18 @@ def entry():
 
     a = QzonePhotoManager(main_user, main_pass)
     io_print(u'登录成功')
+
+    # 一些优化配置，根据自己的需要调整
+    # 如果不需要调整的话，可以将这个配置在这里注释掉使用默认配置
+    global app_config
+    app_config["max_workers"] = 15  # 并行下载线程数量
+    app_config["timeout_init"] = 30  # 初始超时时间，可以调整大一点，防止某些照片过大，响应太慢
+    app_config["max_attempts"] = 10  # 下载失败后最大重试次数
+    app_config["is_api_debug"] = False  # 是否打印 API 的响应结果，在调试的时候使用
+    app_config["executionQzoneAlbums"] = [
+        '婚纱-精修-20190924-第一版',
+        '婚纱-115张精修底片'
+    ]  # 排除不下载的相册名称
 
     # 如果遇到下载失败的，产生超时异常终止程序运行的，可以再重新运行，已经下载过的文件不会重新下载
     for e in dest_users:

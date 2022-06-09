@@ -17,11 +17,13 @@
   $ pip install -r requirements.txt
   ```
 
-- [chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads)
+- [chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) : 
+
+  下载对应系统的 chromedriver，比如 windows上的 chromedriver.exe 简单的话就放到项目根目录就可以了
 
 - 修改 QQ 号
 
-  打开`downloader.py`，定位到以下代码
+  打开`downloader.py`，定位到以下代码（文件末尾）
 
   ```python
   def entry():
@@ -31,9 +33,18 @@
 
       # 要处理的目标 QQ 号，此处可填入多个QQ号，中间用逗号隔开
       dest_users = [123456, ]
+      # 另外抽象出来的参数配置 app_config，可以按需修改，代码里面有详细注释可参考
   ```
 
 ## 更新说明
+- 2022.06.09 更新
+  
+  1. 抽象了一些默认配置可以在入口处自定义
+  2. API 返回的数据结构已经变更了，这个已经适配到最新的数据结构，可以正常下载了
+  3. 根据抽象的配置，改变了一些 API 调式信息的输出控制
+
+  本版实际使用反馈：重试下载经常会出现，目前我是并发数量改小、超时时间增大，挂着慢慢下载；
+  另外原本程序实现了跳过本地已经下载过的照片，所以如果发现有下载失败的照片，可以等待每一次任务执行完成之后，将完全下载好的相册放到排除配置中，然后再继续尝试下载，就有很大概率将之前下载失败的都下载下来
 
 - 2021.09.28 更新
 
