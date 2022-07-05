@@ -216,6 +216,10 @@ class QzonePhotoManager(object):
             c = json.loads(c)
             if ('data' in c) and ('albumListModeClass' in c['data']):
                 for i in c['data']['albumListModeClass']:
+                    if app_config['is_api_debug']:
+                        print(i['albumList'])
+                    if i['albumList'] is None:
+                        continue
                     for ii in i['albumList']:
                         albums.append(
                             QzoneAlbum._make([ii['id'], ii['name'], ii['total']]))
@@ -342,7 +346,6 @@ def entry():
     app_config["is_api_debug"] = False  # 是否打印 API 的响应结果，在调试的时候使用
     app_config["executionQzoneAlbums"] = [
     ]  # 排除不下载的相册名称，多个用逗号分隔，比如 'a','b'
-
     # 如果遇到下载失败的，产生超时异常终止程序运行的，可以再重新运行，已经下载过的文件不会重新下载
     for e in dest_users:
         io_print(u'正在处理用户 {0}'.format(e))
