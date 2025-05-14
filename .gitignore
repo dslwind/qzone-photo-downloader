@@ -1,5 +1,18 @@
+# Python
 __pycache__/
+*.py[cod]
+.python-version
+
+# Virtual Environment
 .venv/
+venv/
+
+# Project Specific
 qzone_photo/
 chromedriver*
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
 .DS_Store

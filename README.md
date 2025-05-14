@@ -17,26 +17,29 @@
   $ pip install -r requirements.txt
   ```
 
-- [chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) : 
+- [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/) : 
 
   下载对应系统的 chromedriver，比如 windows上的 chromedriver.exe 简单的话就放到项目根目录就可以了
 
 - 修改 QQ 号
 
-  打开`downloader.py`，定位到以下代码（文件末尾）
+  打开`main.py`，定位到以下代码（文件开头）
 
   ```python
-  def entry():
-      # 你的 QQ和密码，QQ号必须写，密码可以省略，然后使用网页快速登录功能
-      main_user = 123456
-      main_pass = ''
-
-      # 要处理的目标 QQ 号，此处可填入多个QQ号，中间用逗号隔开
-      dest_users = [123456, ]
-      # 另外抽象出来的参数配置 app_config，可以按需修改，代码里面有详细注释可参考
+  USER_CONFIG = {
+      "main_user_qq": "123456",  # 替换为您的 QQ 号码
+      "main_user_pass": "",      # 建议留空以进行手动登录
+      "dest_users_qq": ["123456",],  # 替换为目标 QQ 号码（字符串列表）
+  }
   ```
 
 ## 更新说明
+
+- 2025.05.14 更新
+  1. 移除Python 2.x支持，简化为单文件，改用f-string格式化输出调试信息
+  2. 更新相册列表API
+  3. 通过文件开头的`USER_CONFIG`配置QQ号，不再在`main`函数中配置
+
 - 2022.06.09 更新
   
   1. 抽象了一些默认配置可以在入口处自定义
@@ -62,36 +65,4 @@
 
   推荐使用其他 GitHub 项目（例如[QQzoneExporter](https://github.com/wwwpf/QzoneExporter)）代替。
 
-## 旧版说明：
 
-本脚本在`python3.6`下测试通过
-
-### 安装依赖
-
-- selenium
-
-  `pip install selenium`
-
-- ChromeDriver
-
-  需要 webdriver 配合 chrome 浏览器登录，获取 cookie
-
-  chromedriver 下载地址：<https://sites.google.com/a/chromium.org/chromedriver/downloads>
-
-  下载解压后，将 chromedriver.exe 放在脚本所在目录 或加入系统环境变量
-
-### 使用说明
-
-打开`downloader.py`，定位到以下代码
-
-```python
-def entry():
-    # 你的 QQ和密码，QQ号必须写，密码可以省略，然后使用网页快速登录功能
-    main_user = 123456
-    main_pass = ''
-
-    # 要处理的目标 QQ 号，此处可填入多个QQ号，中间用逗号隔开
-    dest_users = [123456, ]
-```
-
-按程序注释修改你的 QQ 号和目标 QQ 号（可以是好友的），然后保存运行即可开始下载。
