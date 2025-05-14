@@ -2,15 +2,18 @@ import errno
 import json
 import os
 import random
+import re
+import shutil
 import sys
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 # --- 配置信息 ---
@@ -18,9 +21,11 @@ APP_CONFIG = {
     "max_workers": 10,  # 并行下载线程数量
     "timeout_init": 30,  # 请求初始超时时间 (秒)
     "max_attempts": 3,  # 下载失败后最大重试次数
-    "is_api_debug": True,  # 是否打印 API 请求 URL 和响应内容
-    "executionQzoneAlbums": [],  # 需要排除不下载的相册名称列表
+    "is_api_debug": False,  # 是否打印 API 请求 URL 和响应内容
+    "exclude_albums": [],  # 需要排除不下载的相册名称列表
+    "download_path": "qzone_photo",  # 下载路径（相对于脚本位置）
 }
+
 USER_CONFIG = {
     "main_user_qq": "123456",  # 替换为您的 QQ 号码
     "main_user_pass": "",  # 建议留空以进行手动登录
@@ -35,79 +40,101 @@ QzonePhoto = namedtuple("QzonePhoto", ["url", "name", "album_name", "is_video"])
 
 
 # --- 工具函数---
-def get_script_directory():
+def get_script_directory() -> str:
     """获取脚本文件所在的绝对路径。"""
     return os.path.dirname(os.path.realpath(__file__))
 
 
 def is_path_valid(pathname: str) -> bool:
     """
-    检查给定路径在当前操作系统中是否有效。
+    检查给定路径名在当前操作系统中是否（可能）有效。
+    主要依赖 os.path.normpath 和一次 os.lstat 调用。
+    它旨在捕获明显的无效路径，例如包含空字符、名称过长或无效字符（由 lstat 检测）。
+
+    注意：如果路径的某个部分不存在（导致 ENOENT），此函数可能无法捕获
+    后续路径组件中的无效名称，因为 os.lstat 会因 ENOENT 而首先失败。
     """
+    # 1. 初始类型和空值检查
+    if not isinstance(pathname, str) or not pathname:
+        return False
+
+    # 2. 检查空字符（在路径组件中通常无效）
+    if "\0" in pathname:
+        return False
+
+    # 3. 尝试规范化路径
     try:
-        if not isinstance(pathname, str) or not pathname:
+        normalized_pathname = os.path.normpath(pathname)
+        # 如果规范化后路径为空字符串（例如，原始路径本身就是问题，或 normpath 的罕见行为），则视为无效。
+        # 初始的 `if not pathname:` 已处理输入为空字符串的情况。
+        # 此处检查确保 normpath 返回的是一个非空字符串。
+        if not normalized_pathname:
             return False
+    except (
+        ValueError
+    ):  # 例如，Windows 上的 normpath 可能会对包含嵌入空字符的路径引发 ValueError
+        return False
+    except Exception:  # normpath 期间的其他特定于操作系统的错误（不太可能，但作为防护）
+        return False
 
-        # 检查无效字符 (操作系统相关，此处为基本检查)
-        # 如果是 Windows 系统，根据需要添加更多检查，例如保留名称
-        # 为简单起见，此检查非常基本。
-        if "\0" in pathname:  # Null 字符通常是无效的
+    # 4. 尝试对整个规范化路径执行 lstat
+    try:
+        os.lstat(normalized_pathname)
+        return True  # 如果 lstat 成功，路径有效
+    except OSError as exc:
+        # 如果文件或路径组件不存在 (ENOENT)，我们假设名称本身仍然可能是有效的。
+        # 函数的目的是检查名称的有效性，而不是路径的存在性。
+        if exc.errno == errno.ENOENT:
+            return True
+        # 以下错误明确表示名称/路径本身存在问题
+        elif (
+            hasattr(exc, "winerror") and exc.winerror == 123
+        ):  # ERROR_INVALID_NAME (Windows)
             return False
-
-        # 尝试获取路径一部分的状态以捕获某些错误
-        # 这并非万无一失，除非尝试创建某些内容。
-        _, head = os.path.splitdrive(pathname)
-        parts = head.split(os.path.sep)
-
-        current_path = (
-            os.path.splitdrive(pathname)[0] + os.path.sep
-            if os.path.splitdrive(pathname)[0]
-            else ""
-        )
-
-        for part in parts:
-            if not part:  # 处理类似 // 或末尾 / 的情况
-                continue
-            current_path = os.path.join(current_path, part)
-            try:
-                # os.lstat 在路径过长或包含无效字符时会引发错误
-                # 在某些操作系统上，但这并非对所有无效名称的全面验证。
-                os.lstat(
-                    os.path.abspath(current_path)
-                )  # 检查绝对路径以正确处理相对路径
-            except OSError as exc:
-                if (
-                    hasattr(exc, "winerror") and exc.winerror == 123
-                ):  # ERROR_INVALID_NAME (Windows)
-                    return False
-                if exc.errno in [
-                    errno.ENAMETOOLONG,
-                    errno.ERANGE,
-                    errno.ENOENT,
-                    errno.EINVAL,
-                ]:
-                    # ENOENT 比较棘手，路径部分可能尚不存在，但仍可用于创建
-                    # 目前，如果组件不存在，我们假设它对此检查存在问题。
-                    # 此函数旨在捕获 *无效* 名称，而不仅仅是不存在的路径。
-                    pass  # ENOENT 的情况跳过，因为父目录可能不存在
-                # 其他错误也可能表示路径部分无效
-            except Exception:  # 捕获 lstat 期间的任何其他错误
+        elif exc.errno in [errno.ENAMETOOLONG, errno.ELOOP]:  # 名称过长或符号链接循环
+            return False
+        elif exc.errno == errno.EINVAL:  # 无效参数
+            # 特殊处理 Windows 上的驱动器号（例如 "C:"）。
+            # os.lstat("C:") 在 Windows 上会引发 EINVAL，但我们认为 "C:" 是一个有效的路径前缀。
+            drive, tail = os.path.splitdrive(normalized_pathname)
+            if os.name == "nt" and drive == normalized_pathname and not tail:
+                # 这确实是一个驱动器号，例如 "C:" (normalized_pathname == "C:")
+                return True
+            else:
+                # 其他 EINVAL 情况（或非 Windows 系统上的 EINVAL）表示路径无效。
                 return False
-        return True
-
-    except TypeError:
+        else:
+            # 其他 OSError（例如 EACCES - 权限问题）不一定意味着名称无效，
+            # 但为了简化和安全起见，我们将它们视为路径无效。
+            return False
+    except Exception:  # 捕获 lstat 期间的任何其他非 OSError 异常（不太可能）
         return False
 
 
 def sanitize_filename_component(name_component: str) -> str:
-    """替换文件名组件中的操作系统路径分隔符。"""
-    return name_component.replace("/", "_").replace("\\", "_")
+    """安全处理文件名组件，替换所有非法字符为下划线
+
+    参数:
+        name_component: 需要处理的原始文件名组件
+
+    返回:
+        处理后的安全字符串
+    """
+    if not isinstance(name_component, str):
+        raise TypeError("输入必须是字符串类型")
+
+    # 定义正则表达式模式，匹配各种操作系统中的非法文件名字符
+    illegal_chars = r'[\/\\:*?"<>|\0]'  # 包含路径分隔符和其他特殊字符
+
+    # 使用单个正则替换所有非法字符
+    return re.sub(illegal_chars, "_", name_component)
 
 
 # --- 核心逻辑 ---
 def get_save_directory(user_qq: str) -> str:
-    """确定给定用户的照片保存目录。"""
-    return os.path.join(get_script_directory(), "qzone_photo", str(user_qq))
+    """确定给定用户的照片保存目录"""
+    download_path = APP_CONFIG.get("download_path", "downloads")
+    return os.path.join(get_script_directory(), download_path, str(user_qq))
 
 
 def download_photo_network_helper(
@@ -118,13 +145,12 @@ def download_photo_network_helper(
     """
     try:
         if session:
-            # 使用 GET 方法，因为 POST 可能不适用于直接的图片 URL
             return session.get(url, timeout=timeout)
         else:
             return requests.get(url, timeout=timeout)
-    except requests.exceptions.RequestException as e:  # 捕获更广泛的请求异常
+    except requests.exceptions.RequestException as e:
         print(f"[网络错误] 尝试下载 {url} 时出错: {e}")
-        raise  # 重新引发异常，由重试逻辑捕获
+        raise
 
 
 def save_photo_worker(args: tuple) -> None:
@@ -161,9 +187,7 @@ def save_photo_worker(args: tuple) -> None:
             return
 
     if os.path.exists(full_photo_path):
-        print(
-            f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')"
-        )
+        print(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
         return
 
     url = photo.url.replace("\\", "")  # 清理 URL
@@ -179,9 +203,7 @@ def save_photo_worker(args: tuple) -> None:
 
             with open(full_photo_path, "wb") as f:
                 f.write(response.content)
-            print(
-                f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s"
-            )
+            print(f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s")
             return  # 下载成功
         except (
             requests.exceptions.ReadTimeout,
@@ -189,23 +211,15 @@ def save_photo_worker(args: tuple) -> None:
         ) as e:
             attempts += 1
             current_timeout += 5
-            print(
-                f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}"
-            )
+            print(f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}")
         except requests.exceptions.HTTPError as e:
-            print(
-                f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。"
-            )
+            print(f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。")
             return  # 对于像 404, 403 这样的 HTTP 错误不进行重试
         except Exception as e:  # 捕获任何其他意外错误
             attempts += 1  # 暂时将其视为可重试的错误
-            print(
-                f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}"
-            )
+            print(f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}")
 
-    print(
-        f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)"
-    )
+    print(f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)")
 
 
 class QzonePhotoManager:
@@ -240,14 +254,15 @@ class QzonePhotoManager:
 
     def _login_and_get_cookies(self):
         """使用 Selenium 登录 QQ 空间以获取必要的 cookie。"""
-        # 确保 chromedriver 在 PATH 中或指定 executable_path
-        driver_path = os.path.join(get_script_directory(), "chromedriver.exe")
-        if not os.path.exists(driver_path):
-            # 如果脚本目录没有，尝试从系统PATH加载
-            if os.name == "nt":  # Windows
-                driver_path = "chromedriver.exe"
-            else:  # Linux/macOS
-                driver_path = "chromedriver"
+        driver_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+
+        # 1. 优先从脚本目录查找
+        local_path = os.path.join(get_script_directory(), driver_name)
+        if os.path.exists(local_path):
+            driver_path = local_path
+        # 2. 从系统PATH查找
+        else:
+            driver_path = driver_name if shutil.which(driver_name) else None
 
         print("正在尝试启动 Chrome 进行登录...")
         options = webdriver.ChromeOptions()
@@ -262,31 +277,22 @@ class QzonePhotoManager:
         except Exception as e:
             print(f"启动 ChromeDriver 失败。请确保它在您的 PATH 或脚本目录中: {e}")
             print(f"尝试使用的驱动路径: {driver_path}")
-            print(
-                "您可以从以下地址下载 ChromeDriver: https://chromedriver.chromium.org/downloads"
-            )
+            print("您可以从以下地址下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing")
             sys.exit(1)
 
         driver.get("https://user.qzone.qq.com")
         print("请在浏览器窗口中登录 QQ 空间。脚本将在登录后继续...")
 
-        # 优化后的等待逻辑 ============================================
+        # 等待登录
         LOGIN_TIMEOUT = 300  # 最大等待时间(秒)
-        POLL_INTERVAL = 5  # 检查间隔(秒)
 
         try:
-            logged_in = WebDriverWait(driver, LOGIN_TIMEOUT).until(
-                lambda d: (
-                    # 检查多个可能的登录成功标志
-                    self._is_element_present(
-                        d, By.ID, "QM_OwnerInfo_Icon"
-                    )  # 个人资料图标
-                    or self._is_element_present(
-                        d, By.ID, "QZ_Toolbar_Container"
-                    )  # 导航菜单
-                    or self._is_element_present(
-                        d, By.ID, "QM_Mood_Poster_Container"
-                    )  # 说点什么
+            wait = WebDriverWait(driver, LOGIN_TIMEOUT)
+            logged_in = wait.until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.ID, "QM_OwnerInfo_Icon")),
+                    EC.presence_of_element_located((By.ID, "QZ_Toolbar_Container")),
+                    EC.presence_of_element_located((By.ID, "QM_Mood_Poster_Container")),
                 )
             )
 
@@ -316,28 +322,21 @@ class QzonePhotoManager:
         for cookie_name, cookie_value in self.cookies.items():
             self.session.cookies.set(cookie_name, cookie_value)
 
-        p_skey = self.cookies.get("p_skey") or self.cookies.get(
-            "skey"
-        )  # p_skey 通常是首选
+        p_skey = self.cookies.get("p_skey") or self.cookies.get("skey")
         if not p_skey:
             print("错误: 在 cookie 中未找到 'p_skey' 或 'skey'。无法计算 g_tk。")
-            print(
-                "可用的 cookies:", list(self.cookies.keys())
-            )  # 打印可用的cookie键，方便调试
+            # 打印可用的cookie键，方便调试
+            print("可用的 cookies:", list(self.cookies.keys()))
             driver.quit()
             sys.exit(1)
 
         self.qzone_g_tk = self._calculate_g_tk(p_skey)
         print("成功获取 cookie 和 g_tk。")
-        driver.quit()
+        if APP_CONFIG["is_api_debug"]:
+            print(f"cookie: {self.cookies}")
+            print(f"g_tk: {self.qzone_g_tk}")
 
-    def _is_element_present(self, driver, by, value):
-        """安全检查元素是否存在"""
-        try:
-            driver.find_element(by, value)
-            return True
-        except NoSuchElementException:
-            return False
+        driver.quit()
 
     def _calculate_g_tk(self, p_skey: str) -> int:
         """根据 p_skey 计算 g_tk。"""
@@ -363,16 +362,14 @@ class QzonePhotoManager:
         # 清理 JSONP 包装器："shine0_Callback(...);" 或类似格式
         if text_content.startswith("shine0_Callback(") and text_content.endswith(");"):
             json_str = text_content[len("shine0_Callback(") : -2]
-        elif text_content.startswith("_Callback(") and text_content.endswith(
-            ");"
-        ):  # 某些 API 可能使用此格式
+        elif text_content.startswith("_Callback(") and text_content.endswith(");"):
+            # 某些 API 可能使用此格式
             json_str = text_content[len("_Callback(") : -2]
         else:
             # 如果没有已知的包装器，则尝试直接解析；如果看起来像错误，则记录日志
             if APP_CONFIG["is_api_debug"]:
-                print(
-                    f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}"
-                )  # 记录内容开头部分
+                # 记录内容开头部分
+                print(f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}")
             json_str = text_content  # 假设它可能是纯 JSON
 
         try:
@@ -397,35 +394,36 @@ class QzonePhotoManager:
 
         data = self._access_qzone_api(url)
         if APP_CONFIG["is_api_debug"]:
-            print(
-                f"相册 API 响应数据: {json.dumps(data, indent=2, ensure_ascii=False)}"
-            )  # ensure_ascii=False 以正确显示中文
+            dump = json.dumps(
+                data,
+                indent=2,
+                ensure_ascii=False,  # ensure_ascii=False 以正确显示中文
+            )
+            print(f"相册 API 响应数据: {dump}")
 
-        if (
-            data
-            and "data" in data
-            and data["data"]
-            and "albumListModeSort" in data["data"]
-        ):
-            for album_data in data["data"]["albumListModeSort"]:
+        if not data or not data.get("data"):
+            return albums
+
+        album_data = data["data"]
+
+        # 优先处理新版API格式
+        if "albumListModeSort" in album_data:
+            for album in album_data["albumListModeSort"]:
                 albums.append(
                     QzoneAlbum(
-                        uid=album_data["id"],
-                        name=album_data["name"],
-                        count=album_data["total"],
+                        uid=album["id"],
+                        name=album["name"],
+                        count=album["total"],
                     )
                 )
-        elif (
-            data and "data" in data and data["data"] and "albumlist" in data["data"]
-        ):  # 某些较旧的 API 版本
-            for album_data in data["data"]["albumlist"]:
+        # 兼容旧版API格式
+        elif "albumlist" in album_data:
+            for album in album_data["albumlist"]:
                 albums.append(
                     QzoneAlbum(
-                        uid=album_data["albumid"],  # 字段名称可能不同
-                        name=album_data["name"],
-                        count=album_data.get(
-                            "total", album_data.get("picnum", 0)
-                        ),  # 兼容不同字段名表示照片总数
+                        uid=album["albumid"],  # 字段名称可能不同
+                        name=album["name"],
+                        count=album.get("total", album.get("picnum", 0)),
                     )
                 )
 
@@ -456,22 +454,16 @@ class QzonePhotoManager:
 
             data = self._access_qzone_api(url)
             if APP_CONFIG["is_api_debug"]:
-                print(
-                    f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}"
-                )
+                print(f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}")
 
-            if not data or "data" not in data or not data["data"]:
+            if not data or not data.get("data"):
                 if data and data.get("code", 0) != 0:  # 检查 API 错误代码
-                    print(
-                        f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}"
-                    )
+                    print(f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}")
                 break  # 没有更多数据或发生错误
 
             api_data_section = data["data"]
             total_in_album = api_data_section.get("totalInAlbum", 0)  # 相册中的总照片数
-            photos_in_page = api_data_section.get(
-                "totalInPage", 0
-            )  # 当前响应中的照片数量
+            photos_in_page = api_data_section.get("totalInPage", 0)  # 当前响应中的照片数量
 
             if total_in_album == 0:  # 相册为空
                 print(f"相册 '{album.name}' (ID: {album.uid}) 为空或没有可访问的照片。")
@@ -482,9 +474,7 @@ class QzonePhotoManager:
                 if (
                     photos_in_page == 0 and page_start > 0
                 ):  # 如果不是第一页且没有照片，则表示已到达末尾
-                    print(
-                        f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。"
-                    )
+                    print(f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。")
                 elif photos_in_page == 0 and page_start == 0:
                     print(f"在相册 '{album.name}' 的第一页未找到照片。")
                 break
@@ -503,17 +493,13 @@ class QzonePhotoManager:
 
                 if not pic_url:
                     if APP_CONFIG["is_api_debug"]:
-                        print(
-                            f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}"
-                        )
+                        print(f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}")
                     continue
 
                 photos.append(
                     QzonePhoto(
                         url=pic_url,
-                        name=photo_data.get(
-                            "name", "untitled"
-                        ).strip(),  # 照片名，默认为'untitled'并去除首尾空格
+                        name=photo_data.get("name", "untitled").strip(),  # 照片名，默认为'untitled'并去除首尾空格
                         album_name=album.name,  # 将相册名称添加到照片元组中以便于追溯
                         is_video=bool(
                             photo_data.get("is_video", False)
@@ -540,9 +526,7 @@ class QzonePhotoManager:
 
         print(f"为用户 {dest_user_qq} 找到 {len(albums)} 个相册:")
         for i, album_item in enumerate(albums):
-            print(
-                f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})"
-            )
+            print(f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})")
 
         all_photo_tasks = []
         user_save_dir = get_save_directory(dest_user_qq)
@@ -550,12 +534,13 @@ class QzonePhotoManager:
             os.makedirs(user_save_dir, exist_ok=True)
 
         for album_index, album in enumerate(albums):
-            if album.name in APP_CONFIG["executionQzoneAlbums"]:
+            if album.name in APP_CONFIG["exclude_albums"]:
                 print(f"跳过排除的相册: '{album.name}'")
                 continue
 
             album_path = os.path.join(
-                user_save_dir, sanitize_filename_component(album.name.strip())
+                user_save_dir, 
+                sanitize_filename_component(album.name.strip(),)
             )
             if not os.path.exists(album_path):
                 try:
@@ -566,9 +551,7 @@ class QzonePhotoManager:
 
             print(f"\n正在获取相册 '{album.name}' 的照片 (预计 {album.count} 张)...")
             photos_in_album = self.get_photos_from_album(dest_user_qq, album)
-            print(
-                f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。"
-            )
+            print(f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。")
 
             for photo_idx, photo_item in enumerate(photos_in_album):
                 all_photo_tasks.append(
@@ -586,9 +569,7 @@ class QzonePhotoManager:
             print(f"没有为用户 {dest_user_qq} 下载的照片。")
             return
 
-        print(
-            f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程..."
-        )
+        print(f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程...")
         with ThreadPoolExecutor(max_workers=APP_CONFIG["max_workers"]) as executor:
             # map 会运行任务并收集结果 (在这种情况下是 None)
             list(executor.map(save_photo_worker, all_photo_tasks))
@@ -610,7 +591,7 @@ def main():
     # APP_CONFIG["max_workers"] = 10
     # APP_CONFIG["timeout_init"] = 45
     # APP_CONFIG["is_api_debug"] = True
-    # APP_CONFIG["executionQzoneAlbums"] = ["旧照片", "随拍"]
+    # APP_CONFIG["exclude_albums"] = ["旧照片", "随拍"]
 
     if main_user_qq == "123456":  # 检查是否使用了默认的QQ号
         print("请在脚本中更新 'main_user_qq' 和 'dest_users_qq'。")
