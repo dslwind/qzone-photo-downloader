@@ -21,7 +21,7 @@ APP_CONFIG = {
     "max_workers": 10,  # 并行下载线程数量
     "timeout_init": 30,  # 请求初始超时时间 (秒)
     "max_attempts": 3,  # 下载失败后最大重试次数
-    "is_api_debug": False,  # 是否打印 API 请求 URL 和响应内容
+    "is_api_debug": True,  # 是否打印 API 请求 URL 和响应内容
     "exclude_albums": [],  # 需要排除不下载的相册名称列表
     "download_path": "qzone_photo",  # 下载路径（相对于脚本位置）
 }
@@ -405,10 +405,15 @@ class QzonePhotoManager:
             return albums
 
         album_data = data["data"]
-
-        # 优先处理新版API格式
-        if "albumListModeSort" in album_data:
-            for album in album_data["albumListModeSort"]:
+        if "albumListModeSort" in album_data:       # 普通视图
+            album_list = album_data["albumListModeSort"]    
+        elif "albumListModeClass" in album_data:    # 列表视图
+            album_list = [item for d in album_data["albumListModeClass"] for item in d.get('albumList', [])]
+        else:
+            album_list = []
+        
+        if album_list:
+            for album in album_list:
                 albums.append(
                     QzoneAlbum(
                         uid=album["id"],
