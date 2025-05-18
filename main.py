@@ -187,7 +187,9 @@ def save_photo_worker(args: tuple) -> None:
             return
 
     if os.path.exists(full_photo_path):
-        print(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
+        print(
+            f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')"
+        )
         return
 
     url = photo.url.replace("\\", "")  # 清理 URL
@@ -203,7 +205,9 @@ def save_photo_worker(args: tuple) -> None:
 
             with open(full_photo_path, "wb") as f:
                 f.write(response.content)
-            print(f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s")
+            print(
+                f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s"
+            )
             return  # 下载成功
         except (
             requests.exceptions.ReadTimeout,
@@ -211,15 +215,23 @@ def save_photo_worker(args: tuple) -> None:
         ) as e:
             attempts += 1
             current_timeout += 5
-            print(f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}")
+            print(
+                f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}"
+            )
         except requests.exceptions.HTTPError as e:
-            print(f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。")
+            print(
+                f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。"
+            )
             return  # 对于像 404, 403 这样的 HTTP 错误不进行重试
         except Exception as e:  # 捕获任何其他意外错误
             attempts += 1  # 暂时将其视为可重试的错误
-            print(f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}")
+            print(
+                f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}"
+            )
 
-    print(f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)")
+    print(
+        f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)"
+    )
 
 
 class QzonePhotoManager:
@@ -269,15 +281,46 @@ class QzonePhotoManager:
         # 如果需要，添加任何选项，例如：无头模式、用户代理
         # options.add_argument('--headless')
         # options.add_argument('--disable-gpu')
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-blink-features")
 
+        # options.add_argument("--disable-extensions")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--lang=zh-CN")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
         # 使用 Service 对象指定 ChromeDriver路径
         service = ChromeService(executable_path=driver_path)
         try:
             driver = webdriver.Chrome(service=service, options=options)
+            driver.execute_cdp_cmd(
+                "Network.setUserAgentOverride",
+                {
+                    "userAgent": driver.execute_script(
+                        "return navigator.userAgent"
+                    ).replace("Headless", "")
+                },
+            )
+            driver.execute_cdp_cmd(
+                "Page.removeScriptToEvaluateOnNewDocument", {"identifier": "1"}
+            )
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    })
+                """
+                },
+            )
         except Exception as e:
             print(f"启动 ChromeDriver 失败。请确保它在您的 PATH 或脚本目录中: {e}")
             print(f"尝试使用的驱动路径: {driver_path}")
-            print("您可以从以下地址下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing")
+            print(
+                "您可以从以下地址下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing"
+            )
             sys.exit(1)
 
         driver.get("https://user.qzone.qq.com")
@@ -369,7 +412,9 @@ class QzonePhotoManager:
             # 如果没有已知的包装器，则尝试直接解析；如果看起来像错误，则记录日志
             if APP_CONFIG["is_api_debug"]:
                 # 记录内容开头部分
-                print(f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}")
+                print(
+                    f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}"
+                )
             json_str = text_content  # 假设它可能是纯 JSON
 
         try:
@@ -405,13 +450,17 @@ class QzonePhotoManager:
             return albums
 
         album_data = data["data"]
-        if "albumListModeSort" in album_data:       # 普通视图
-            album_list = album_data["albumListModeSort"]    
-        elif "albumListModeClass" in album_data:    # 列表视图
-            album_list = [item for d in album_data["albumListModeClass"] for item in d.get('albumList', [])]
+        if "albumListModeSort" in album_data:  # 普通视图
+            album_list = album_data["albumListModeSort"]
+        elif "albumListModeClass" in album_data:  # 列表视图
+            album_list = [
+                item
+                for d in album_data["albumListModeClass"]
+                for item in d.get("albumList", [])
+            ]
         else:
             album_list = []
-        
+
         if album_list:
             for album in album_list:
                 albums.append(
@@ -459,16 +508,22 @@ class QzonePhotoManager:
 
             data = self._access_qzone_api(url)
             if APP_CONFIG["is_api_debug"]:
-                print(f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                print(
+                    f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}"
+                )
 
             if not data or not data.get("data"):
                 if data and data.get("code", 0) != 0:  # 检查 API 错误代码
-                    print(f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}")
+                    print(
+                        f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}"
+                    )
                 break  # 没有更多数据或发生错误
 
             api_data_section = data["data"]
             total_in_album = api_data_section.get("totalInAlbum", 0)  # 相册中的总照片数
-            photos_in_page = api_data_section.get("totalInPage", 0)  # 当前响应中的照片数量
+            photos_in_page = api_data_section.get(
+                "totalInPage", 0
+            )  # 当前响应中的照片数量
 
             if total_in_album == 0:  # 相册为空
                 print(f"相册 '{album.name}' (ID: {album.uid}) 为空或没有可访问的照片。")
@@ -479,7 +534,9 @@ class QzonePhotoManager:
                 if (
                     photos_in_page == 0 and page_start > 0
                 ):  # 如果不是第一页且没有照片，则表示已到达末尾
-                    print(f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。")
+                    print(
+                        f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。"
+                    )
                 elif photos_in_page == 0 and page_start == 0:
                     print(f"在相册 '{album.name}' 的第一页未找到照片。")
                 break
@@ -498,13 +555,17 @@ class QzonePhotoManager:
 
                 if not pic_url:
                     if APP_CONFIG["is_api_debug"]:
-                        print(f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}")
+                        print(
+                            f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}"
+                        )
                     continue
 
                 photos.append(
                     QzonePhoto(
                         url=pic_url,
-                        name=photo_data.get("name", "untitled").strip(),  # 照片名，默认为'untitled'并去除首尾空格
+                        name=photo_data.get(
+                            "name", "untitled"
+                        ).strip(),  # 照片名，默认为'untitled'并去除首尾空格
                         album_name=album.name,  # 将相册名称添加到照片元组中以便于追溯
                         is_video=bool(
                             photo_data.get("is_video", False)
@@ -531,7 +592,9 @@ class QzonePhotoManager:
 
         print(f"为用户 {dest_user_qq} 找到 {len(albums)} 个相册:")
         for i, album_item in enumerate(albums):
-            print(f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})")
+            print(
+                f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})"
+            )
 
         all_photo_tasks = []
         user_save_dir = get_save_directory(dest_user_qq)
@@ -544,8 +607,10 @@ class QzonePhotoManager:
                 continue
 
             album_path = os.path.join(
-                user_save_dir, 
-                sanitize_filename_component(album.name.strip(),)
+                user_save_dir,
+                sanitize_filename_component(
+                    album.name.strip(),
+                ),
             )
             if not os.path.exists(album_path):
                 try:
@@ -556,7 +621,9 @@ class QzonePhotoManager:
 
             print(f"\n正在获取相册 '{album.name}' 的照片 (预计 {album.count} 张)...")
             photos_in_album = self.get_photos_from_album(dest_user_qq, album)
-            print(f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。")
+            print(
+                f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。"
+            )
 
             for photo_idx, photo_item in enumerate(photos_in_album):
                 all_photo_tasks.append(
@@ -574,7 +641,9 @@ class QzonePhotoManager:
             print(f"没有为用户 {dest_user_qq} 下载的照片。")
             return
 
-        print(f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程...")
+        print(
+            f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程..."
+        )
         with ThreadPoolExecutor(max_workers=APP_CONFIG["max_workers"]) as executor:
             # map 会运行任务并收集结果 (在这种情况下是 None)
             list(executor.map(save_photo_worker, all_photo_tasks))
