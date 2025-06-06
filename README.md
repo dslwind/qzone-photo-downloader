@@ -71,4 +71,4 @@
 
   如果你觉得这个脚本对您有用，可以打赏我以表支持。
 
-  <img src="qr.jpg" />
+  <img src="qr.jpg" width=300/>
