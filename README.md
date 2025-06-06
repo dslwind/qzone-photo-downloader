@@ -23,17 +23,18 @@
 
 - 修改 QQ 号
 
-  打开`main.py`，定位到以下代码（文件开头）
+  打开`config.json`，修改以下配置（更多配置说明请参考`main.py`的注释）：
 
-  ```python
-  USER_CONFIG = {
-      "main_user_qq": "123456",  # 替换为您的 QQ 号码
-      "main_user_pass": "",      # 建议留空以进行手动登录
-      "dest_users_qq": ["123456",],  # 替换为目标 QQ 号码（字符串列表）
-  }
+  ```json
+  "main_user_qq": "123456",
+  "dest_users_qq": ["123456"],
   ```
+  
+  将`main_user_qq`修改为您的QQ号码，`dest_users_qq`修改为好友的QQ号码，多个号码用`,`分隔，注意`]`前不要有`,`，例如`["123", "456"]`。
 
 ## 更新说明
+- 2025.06.06 更新
+  将配置信息移到`config.json`文件中，不再修改`.py`文件
 
 - 2025.05.14 更新
   1. 移除Python 2.x支持，简化为单文件，改用`f-string`格式化输出调试信息
@@ -66,3 +67,8 @@
   推荐使用其他 GitHub 项目（例如[QQzoneExporter](https://github.com/wwwpf/QzoneExporter)）代替。
 
 
+## 支持一下
+
+  如果你觉得这个脚本对您有用，可以打赏我以表支持。
+
+  <img src="qr.jpg" />

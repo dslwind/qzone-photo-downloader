@@ -17,19 +17,43 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 # --- 配置信息 ---
+CONFIG_FILE = "config.json"
+CONFIG = {}
+
+def load_config():
+    """从配置文件加载配置。"""
+    global CONFIG
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            CONFIG = json.load(f)
+        print(f"成功从 {CONFIG_FILE} 加载配置。")
+    except FileNotFoundError:
+        print(f"错误: 配置文件 {CONFIG_FILE} 未找到。请确保它存在。")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"错误: 解析配置文件 {CONFIG_FILE} 失败: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"加载配置文件时发生意外错误: {e}")
+        sys.exit(1)
+
+# 在脚本开始时加载配置
+load_config()
+
+# 请在json文件中修改配置
 APP_CONFIG = {
-    "max_workers": 10,  # 并行下载线程数量
-    "timeout_init": 30,  # 请求初始超时时间 (秒)
-    "max_attempts": 3,  # 下载失败后最大重试次数
-    "is_api_debug": True,  # 是否打印 API 请求 URL 和响应内容
-    "exclude_albums": [],  # 需要排除不下载的相册名称列表
-    "download_path": "qzone_photo",  # 下载路径（相对于脚本位置）
+    "max_workers": CONFIG.get("max_workers", 10),       # 并行下载线程数量
+    "timeout_init": CONFIG.get("timeout_init", 30),     # 请求初始超时时间 (秒)
+    "max_attempts": CONFIG.get("max_attempts", 3),      # 下载失败后最大重试次数
+    "is_api_debug": CONFIG.get("is_api_debug", True),   # 是否打印 API 请求 URL 和响应内容
+    "exclude_albums": CONFIG.get("exclude_albums", []), # 需要排除、不下载的相册名称列表
+    "download_path": CONFIG.get("download_path", "qzone_photo"),    # 下载路径（相对于脚本位置）
 }
 
 USER_CONFIG = {
-    "main_user_qq": "123456",  # 替换为您的 QQ 号码
-    "main_user_pass": "",  # 建议留空以进行手动登录
-    "dest_users_qq": ["123456",],  # 替换为目标 QQ 号码（字符串列表）
+    "main_user_qq": CONFIG.get("main_user_qq", "123456"),       # 替换为您的 QQ 号码
+    "main_user_pass": CONFIG.get("main_user_pass", ""),         # 建议留空以进行手动登录
+    "dest_users_qq": CONFIG.get("dest_users_qq", ["123456",]),   # 替换为目标 QQ 号码（字符串列表）
 }
 
 # --- 命名元组 ---
@@ -668,7 +692,7 @@ def main():
     # APP_CONFIG["exclude_albums"] = ["旧照片", "随拍"]
 
     if main_user_qq == "123456":  # 检查是否使用了默认的QQ号
-        print("请在脚本中更新 'main_user_qq' 和 'dest_users_qq'。")
+        print("请在配置文件中更新 'main_user_qq' 和 'dest_users_qq'。")
         return
 
     try:
