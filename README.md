@@ -71,4 +71,4 @@
 
   如果你觉得这个脚本对您有用，可以打赏我以表支持。
 
-  <img src="qr.jpg" width=300/>
+  <img src="https://github.com/dslwind/CDN/blob/7c47ec44c5d8f82ce0f686eeda73d2f539a4de02/images/mm_reward_qrcode.png" width=300/>
