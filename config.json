@@ -1,0 +1,11 @@
+{
+    "main_user_qq": "123456",
+    "main_user_pass": "",
+    "dest_users_qq": ["123456","0"],
+    "max_workers": 10,
+    "timeout_init": 30,
+    "max_attempts": 3,
+    "is_api_debug": true,
+    "exclude_albums": [""],
+    "download_path": "qzone_photo"
+}
