@@ -1,2 +1,70 @@
-# Auto detect text files and perform LF normalization
+# Declare files that should always be treated as text and ensure LF line endings.
+# This prevents issues with line endings across different operating systems (Windows CRLF vs Linux/macOS LF).
+# The 'text' attribute enables line ending normalization.
+# The 'eol=lf' attribute ensures line endings are always LF on checkout AND commit.
+# This is generally the preferred standard for text files in Git repositories.
+
+*.py       text eol=lf     # Python source files
+*.sh       text eol=lf     # Shell scripts (must be LF)
+*.txt      text eol=lf     # Generic text files
+*.md       text eol=lf     # Markdown documentation
+*.rst      text eol=lf     # RestructuredText documentation
+*.json     text eol=lf     # JSON configuration/data files
+*.yaml     text eol=lf     # YAML configuration files
+*.yml      text eol=lf     # YAML configuration files (common alternative extension)
+*.toml     text eol=lf     # TOML configuration files (e.g., pyproject.toml)
+*.cfg      text eol=lf     # INI/Cfg style configuration files
+*.ini      text eol=lf     # INI style configuration files
+*.env      text eol=lf     # Environment files (.env)
+LICENSE    text eol=lf     # License file (assuming it's text)
+.gitignore text eol=lf     # .gitignore itself
+.editorconfig text eol=lf  # .editorconfig file
+
+# Common Python project specific files that are text
+Pipfile          text eol=lf
+Pipfile.lock     text eol=lf
+pyproject.toml   text eol=lf
+requirements.txt text eol=lf
+setup.py         text eol=lf
+
+# Use text=auto for everything else as a fallback.
+# Git will try to guess if a file is text or binary based on its content.
+# If it guesses text, line endings will be handled based on the user's core.autocrlf setting.
+# Explicit declarations above override this for critical file types.
 * text=auto
+
+# Declare files that are binary and should not be diffed or merged.
+# This prevents Git from attempting to show useless diffs or causing merge conflicts
+# for non-text files like images, compiled files, or data files.
+*.jpg      binary
+*.jpeg     binary
+*.png      binary
+*.gif      binary
+*.svg      binary     # SVG is XML, but often treated visually/binary by tools
+*.ico      binary     # Icon files
+*.pdf      binary     # PDF documents
+*.zip      binary     # Zip archives
+*.tar.gz   binary     # Tar.gz archives
+*.sqlite   binary     # SQLite database files (if tracked)
+*.lock     binary     # Generic lock files (use with caution, depends on type)
+*.pkl      binary     # Python pickle files (if tracked)
+*.hdf5     binary     # HDF5 data files (if tracked)
+*.parquet  binary     # Parquet data files (if tracked)
+*.onnx     binary     # ONNX model files (if tracked)
+
+# Optional: Help GitHub/GitLab/etc. language detection (Linguist)
+# Mark directories or files that are generated build artifacts or documentation output
+# so they don't skew the project's language statistics.
+# Adjust paths based on your project's actual build process and structure.
+/dist/*                linguist-generated=true # Python wheel/sdist distribution directory
+/build/*               linguist-generated=true # Build directory
+/docs/_build/*         linguist-generated=true # Sphinx documentation output directory
+# If you track a vendor directory with copied code (less common in Python due to package managers)
+# vendor/*             linguist-vendored=true
+
+# Optional: Exclude files/directories when using 'git archive' to create a source tarball
+# Useful for omitting test files, build scripts, or editor configurations from releases.
+# test/*               export-ignore
+# tests/*              export-ignore
+# .vscode/*            export-ignore
+# .*                   export-ignore # Be careful with this, it hides ALL dotfiles (.env, .gitignore, etc.)
