@@ -106,7 +106,6 @@ qzone-photo-downloader/
    - 分批下载相册
 1. 如何只下载特定相册？
    在 `exclude_albums` 中添加不想下载的相册名称
-   本版实际使用反馈：重试下载经常会出现，目前我是并发数量改小、超时时间增大，挂着慢慢下载；
 1. 支持视频下载吗？
    不支持直接下载视频，但会保留视频缩略图作为标记
 
@@ -126,4 +125,5 @@ qzone-photo-downloader/
 ## ☕ 支持作者
 
 如果这个项目对你有帮助，可以考虑请作者喝杯咖啡 :)
+
 <img src="https://cdn.jsdelivr.net/gh/dslwind/CDN/images/mm_reward_qrcode.png" width=300/>
