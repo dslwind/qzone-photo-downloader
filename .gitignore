@@ -11,6 +11,15 @@ venv/
 qzone_photo/
 chromedriver*
 .DS_Store
+config.json
+
+# pyinstaller
+build/
+dist/
+*.spec
+
+# logs
+logs/
 
 # IDE
 .vscode/

@@ -1,74 +1,129 @@
-# QQ 空间照片下载器
+# QQ 空间相册下载工具
 
-## 使用方法
+一款用于下载 QQ 空间相册照片的工具，支持命令行和图形界面两种使用方式。
 
-- 克隆
+## ✨ 功能特性
 
-  ```shell
-  git clone https://github.com/dslwind/qzone-photo-downloader.git
-  cd qzone-photo-downloader
-  ```
+- 双模式运行：GUI 界面和命令行两种使用方式
+- 配置分离：通过`config.json`管理 QQ 账号和下载配置
+- 自动更新：集成`webdriver_manager`自动管理浏览器驱动
+- 断点续传：支持跳过已下载照片
+- 多账号支持：可同时下载多个好友的相册
+- 多线程：支持多线程下载提高效率
+- 日志记录：详细的下载日志和错误信息
+- 追踪下载进度：实时显示当前下载进度
 
-- 虚拟环境
+## 🚀 快速开始
 
-  ```shell
-  $ python3 -m venv venv
-  $ source venv/bin/activate 或 > venv\Scripts\activate.bat
-  $ pip install -r requirements.txt
-  ```
+### 前置要求
 
-- [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/) : 
+- Python 3.7+
+- Chrome 浏览器
 
-  下载对应系统的 chromedriver，比如 windows上的 chromedriver.exe 简单的话就放到项目根目录就可以了
+### 安装方法
 
-- 修改 QQ 号
+#### 方法一：直接运行(无需 Python 环境)
 
-  打开`config.json`，修改以下配置（更多配置说明请参考`main.py`的注释）：
+1. 从[Releases 页面](https://github.com/dslwind/qzone-photo-downloader/releases)下载打包好的 exe 文件
+2. 解压后运行`QzonePhotoDownloader.exe`
 
-  ```json
-  "main_user_qq": "123456",
-  "dest_users_qq": ["123456"],
-  ```
-  
-  将`main_user_qq`修改为您的QQ号码，`dest_users_qq`修改为好友的QQ号码，多个号码用`,`分隔，注意`]`前不要有`,`，例如`["123", "456"]`。
+#### 方法二：源码运行
 
-## 更新说明
-- 2025.06.06 更新
-  将配置信息移到`config.json`文件中，不再修改`.py`文件
+```bash
+git clone https://github.com/dslwind/qzone-photo-downloader.git
+cd qzone-photo-downloader
 
-- 2025.05.14 更新
-  1. 移除Python 2.x支持，简化为单文件，改用`f-string`格式化输出调试信息
-  2. 更新相册列表API
-  3. 通过文件开头的`USER_CONFIG`配置QQ号，不再在`main`函数中配置
+# 创建虚拟环境(可选)
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate.bat  # Windows
 
-- 2022.06.09 更新
-  
-  1. 抽象了一些默认配置可以在入口处自定义
-  2. API 返回的数据结构已经变更了，这个已经适配到最新的数据结构，可以正常下载了
-  3. 根据抽象的配置，改变了一些 API 调式信息的输出控制
-  4. 修复了最多只能下载 500 张照片的问题，现在可以全部下载
-  5. 新增视频缩略图标识：由于照片是有序的（接口响应顺序），本软件无法下载视频，可以根据有顺序的视频缩略图人工去定位下载
+# 安装依赖
+pip install -r requirements.txt  # 基础版本
+pip install -r requirements-gui.txt  # GUI版本额外依赖
+```
 
-  本版实际使用反馈：重试下载经常会出现，目前我是并发数量改小、超时时间增大，挂着慢慢下载；
-  另外原本程序实现了跳过本地已经下载过的照片，所以如果发现有下载失败的照片，可以等待每一次任务执行完成之后，将完全下载好的相册放到排除配置中，然后再继续尝试下载，就有很大概率将之前下载失败的都下载下来
+### 配置说明
 
-- 2021.09.28 更新
+编辑 `config.json` 文件:
 
-  已更新代码，目前已经能够导出相册，欢迎下载使用。
+```json
+{
+  "main_user_qq": "你的QQ号",
+  "dest_users_qq": ["目标QQ号1", "目标QQ号2"]
+}
+```
 
-- 2021.09.16 更新说明
+将`main_user_qq`修改为您的 QQ 号码，`dest_users_qq`修改为好友的 QQ 号码。
 
-  已经通过 Chrome 开发者工具获得新的相册列表和图片列表，过几天更新代码
+> 注意: 多个 QQ 号之间用逗号分隔，最后一个 QQ 号后不要加逗号，例如：`["123", "456"]`
 
-- 2021.05.29 更新说明
+### 使用方法
 
-  这个脚本写于 2018 年，当初是为了方便从好友的 QQ 空间相册下载原图，没想到陆陆续续收到了二十多个 Star，现在测试该方法已经失效了。
+#### 命令行模式
 
-  推荐使用其他 GitHub 项目（例如[QQzoneExporter](https://github.com/wwwpf/QzoneExporter)）代替。
+```bash
+python main.py
+```
 
+#### 图形界面模式
 
-## 支持一下
+```bash
+python gui.py
+```
 
-  如果你觉得这个脚本对您有用，可以打赏我以表支持。
+#### 打包为独立应用
 
-  <img src="https://cdn.jsdelivr.net/gh/dslwind/CDN/images/mm_reward_qrcode.png" width=300/>
+```bash
+pyinstaller --name "QzonePhotoDownloader" --windowed --collect-submodules PyQt6 --hidden-import PyQt6.Qt gui.py
+```
+
+## 📦 项目结构
+
+```
+qzone-photo-downloader/
+├── config.json          # 配置文件
+├── gui.py               # PyQt6 GUI实现
+├── main.py              # 核心逻辑
+├── requirements.txt     # 基础依赖
+└── requirements-gui.txt # GUI额外依赖
+```
+
+## ⚙️ 高级配置
+
+可在 `config.json` 中调整以下参数:
+
+- `max_workers`: 并发下载线程数 (默认: 5)
+- `timeout_init`: 初始化超时时间(秒) (默认: 30)
+- `is_api_debug`: 是否开启 API 调试 (默认: false)
+- `exclude_albums`: 要排除的相册名称列表
+
+## ❓ 常见问题
+
+1. 下载过程中出现错误怎么办？
+   - 尝试减少并发数 (`max_workers`)
+   - 增加超时时间 (`timeout_init`)
+   - 分批下载相册
+1. 如何只下载特定相册？
+   在 `exclude_albums` 中添加不想下载的相册名称
+   本版实际使用反馈：重试下载经常会出现，目前我是并发数量改小、超时时间增大，挂着慢慢下载；
+1. 支持视频下载吗？
+   不支持直接下载视频，但会保留视频缩略图作为标记
+
+## 📜 版本历史
+
+已更新代码，目前已经能够导出相册，欢迎下载使用。
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| v2.0 | 2025.06.20 | 新增 GUI 界面，自动管理浏览器驱动 |
+| v1.5 | 2025.06.06 | 迁移配置到 config.json 文件 |
+| v1.0 | 2025.05.14 | 移除 Python 2 支持，优化 API 接口 |
+
+## 🤝 参与贡献
+
+欢迎提交 Issue 或 Pull Request
+
+## ☕ 支持作者
+
+如果这个项目对你有帮助，可以考虑请作者喝杯咖啡 :)
+<img src="https://cdn.jsdelivr.net/gh/dslwind/CDN/images/mm_reward_qrcode.png" width=300/>
