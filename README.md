@@ -122,12 +122,6 @@ qzone-photo-downloader/
 
 欢迎提交 Issue 或 Pull Request
 
-## ☕ 支持作者
-
-如果这个项目对你有帮助，可以考虑请作者喝杯咖啡 :)
-
-<img src="https://cdn.jsdelivr.net/gh/dslwind/CDN/images/mm_reward_qrcode.png" width=300/>
-
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=dslwind/qzone-photo-downloader&type=Date)](https://www.star-history.com/#dslwind/qzone-photo-downloader&Date)
