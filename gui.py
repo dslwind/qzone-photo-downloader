@@ -333,6 +333,77 @@ class QzonePhotoManager:
             self.log_signal.emit(message)  # type: ignore
         logger.info(message)
 
+    def _check_cookie_validity(self) -> bool:
+        """
+        检查当前cookie是否有效。
+        通过尝试访问相册列表API来验证cookie有效性。
+        """
+        if not self.cookies or not self.qzone_g_tk:
+            self._emit_log("Cookie或g_tk为空，无法验证有效性。")
+            return False
+            
+        # 使用相册列表API来检查cookie有效性
+        # 这里使用自己的QQ号作为目标用户来测试cookie是否有效
+        check_url = self.ALBUM_LIST_URL_TEMPLATE.format(
+            gtk=self.qzone_g_tk,
+            t=random.random(),
+            dest_user=self.user_qq,  # 使用自己的QQ号作为目标用户
+            user=self.user_qq,
+        )
+        
+        try:
+            response = self.session.get(check_url, timeout=APP_CONFIG["timeout_init"])
+            response.raise_for_status()
+            
+            # 检查响应内容是否为有效的JSONP格式且不包含错误
+            text_content = response.text
+            if ((text_content.startswith("shine0_Callback(") and text_content.endswith(");")) or
+                (text_content.startswith("_Callback(") and text_content.endswith(");"))):
+                # 尝试解析JSON内容
+                if text_content.startswith("shine0_Callback("):
+                    json_str = text_content[len("shine0_Callback(") : -2]
+                else:
+                    json_str = text_content[len("_Callback(") : -2]
+                
+                try:
+                    data = json.loads(json_str)
+                    # 检查返回码是否为0（成功）
+                    if data.get("code", -1) == 0:
+                        self._emit_log("Cookie验证成功，可以继续使用。")
+                        return True
+                    else:
+                        self._emit_log(f"Cookie验证失败，API返回错误码: {data.get('code', '未知')}")
+                        return False
+                except json.JSONDecodeError:
+                    self._emit_log("Cookie验证失败，无法解析API响应。")
+                    return False
+            else:
+                self._emit_log("Cookie验证失败，API响应格式不正确。")
+                return False
+        except requests.exceptions.RequestException as e:
+            self._emit_log(f"Cookie验证请求失败: {e}")
+            return False
+        except Exception as e:
+            self._emit_log(f"Cookie验证过程中发生错误: {e}")
+            return False
+
+    def _set_cookies_and_gtk(self, cookies: dict, g_tk: str):
+        """
+        设置cookie和g_tk，用于复用已有的登录信息。
+        
+        Args:
+            cookies (dict): cookie字典
+            g_tk (str): g_tk值
+        """
+        self.cookies = cookies
+        self.qzone_g_tk = g_tk
+        
+        # 更新会话中的cookie
+        for cookie_name, cookie_value in self.cookies.items():
+            self.session.cookies.set(cookie_name, cookie_value)
+            
+        self._emit_log("已设置cookie和g_tk。")
+
     def _login_and_get_cookies(self):
         """
         使用 Selenium 登录 QQ 空间以获取必要的 cookie。
@@ -814,6 +885,8 @@ class DownloadWorker(QThread):
         self.dest_users_qq = dest_users_qq
         self.qzone_manager = None
         self._is_stopped = False
+        # 保存上一次使用的QzonePhotoManager实例，用于复用cookie
+        self.previous_qzone_manager = None
 
     def stop(self):
         """设置停止标志，请求线程停止。"""
@@ -828,10 +901,33 @@ class DownloadWorker(QThread):
         """线程的主要执行方法。"""
         try:
             self.log_signal.emit("正在初始化下载管理器并尝试登录...")
-            self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
             
-            if not self.is_stopped():
-                self.qzone_manager._login_and_get_cookies()
+            # 检查是否可以复用之前的cookie
+            reuse_cookie = False
+            if (self.previous_qzone_manager and 
+                self.previous_qzone_manager.user_qq == self.main_user_qq and
+                self.previous_qzone_manager.cookies):
+                
+                self.log_signal.emit("检测到已存在的登录信息，正在验证cookie有效性...")
+                if self.previous_qzone_manager._check_cookie_validity():
+                    # 复用之前的QzonePhotoManager
+                    self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
+                    self.qzone_manager._set_cookies_and_gtk(
+                        self.previous_qzone_manager.cookies, 
+                        str(self.previous_qzone_manager.qzone_g_tk)  # 确保g_tk是字符串类型
+                    )
+                    reuse_cookie = True
+                    self.log_signal.emit("之前的cookie仍然有效，直接使用。")
+                else:
+                    self.log_signal.emit("之前的cookie已失效，需要重新登录。")
+            
+            # 如果不能复用cookie，则创建新的QzonePhotoManager并登录
+            if not reuse_cookie:
+                self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
+                if not self.is_stopped():
+                    self.qzone_manager._login_and_get_cookies()
+            
+            if not self.is_stopped() and self.qzone_manager:
                 self.log_signal.emit("登录过程已完成。")
             else:
                 self.log_signal.emit("启动前已收到停止请求，跳过登录。")
@@ -848,7 +944,8 @@ class DownloadWorker(QThread):
                 target_qq_str = str(target_qq)
                 self.log_signal.emit(f"\n--- 正在处理用户: {target_qq_str} ---")
                 try:
-                    self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
+                    if self.qzone_manager:  # 确保qzone_manager不为None
+                        self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
                 except Exception as e:
                     self.log_signal.emit(f"处理用户 {target_qq_str} 时发生意外错误: {e}")
                     self.log_signal.emit(traceback.format_exc())
@@ -860,7 +957,7 @@ class DownloadWorker(QThread):
                 self.log_signal.emit("\n所有指定用户处理完毕。")
                 logger.info("所有指定用户处理完毕。")
             else:
-                self.log_signal.emit("下载已停止。")  # 修复：移除对不存在属性的访问
+                self.log_signal.emit("下载已停止。")
                 logger.info("下载已停止。")
 
         except Exception as e:
@@ -868,6 +965,9 @@ class DownloadWorker(QThread):
             self.log_signal.emit(traceback.format_exc())
             logger.exception("下载过程中发生关键错误。")
         finally:
+            # 保存当前的QzonePhotoManager实例，供下次使用
+            if self.qzone_manager:
+                self.previous_qzone_manager = self.qzone_manager
             self.finished_signal.emit("All")
 
 
@@ -1039,7 +1139,10 @@ class QzoneDownloaderGUI(QWidget):
         self.log_output.append("开始下载任务...")
         logger.info("开始下载任务...")
 
+        # 传递previous_qzone_manager给新的DownloadWorker实例
+        previous_qzone_manager = self.worker_thread.previous_qzone_manager if self.worker_thread else None
         self.worker_thread = DownloadWorker(main_qq, main_pass, dest_qqs)
+        self.worker_thread.previous_qzone_manager = previous_qzone_manager
         self.worker_thread.log_signal.connect(self.update_log)
         self.worker_thread.progress_signal.connect(self.update_progress)
         self.worker_thread.finished_signal.connect(self.on_download_finished)
