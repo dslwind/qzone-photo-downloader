@@ -1,3 +1,21 @@
+"""
+QQ空间相册照片下载器
+
+该脚本可以自动登录QQ空间并下载指定用户的所有可访问相册照片。
+支持多线程下载、断点续传、排除特定相册等功能。
+
+使用方法:
+1. 在config.json中配置QQ账号信息和下载参数
+2. 运行脚本: python main.py
+3. 在弹出的浏览器窗口中登录QQ空间
+4. 脚本将自动开始下载照片
+
+注意事项:
+- 需要安装Chrome浏览器
+- 需要确保网络连接正常
+- 大量照片下载可能需要较长时间
+"""
+
 import errno
 import json
 import os
@@ -20,8 +38,18 @@ from selenium.webdriver.support.ui import WebDriverWait
 CONFIG_FILE = "config.json"
 CONFIG = {}
 
+
 def load_config():
-    """从配置文件加载配置。"""
+    """从配置文件加载配置。
+    
+    从指定的配置文件中读取JSON格式的配置信息。
+    如果文件不存在或格式错误，将输出错误信息并退出程序。
+    
+    Raises:
+        FileNotFoundError: 当配置文件不存在时
+        json.JSONDecodeError: 当配置文件格式错误时
+        Exception: 当发生其他意外错误时
+    """
     global CONFIG
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -36,6 +64,7 @@ def load_config():
     except Exception as e:
         print(f"加载配置文件时发生意外错误: {e}")
         sys.exit(1)
+
 
 # 在脚本开始时加载配置
 load_config()
@@ -65,7 +94,11 @@ QzonePhoto = namedtuple("QzonePhoto", ["url", "name", "album_name", "is_video"])
 
 # --- 工具函数---
 def get_script_directory() -> str:
-    """获取脚本文件所在的绝对路径。"""
+    """获取脚本文件所在的绝对路径。
+    
+    Returns:
+        str: 脚本文件所在的目录的绝对路径
+    """
     return os.path.dirname(os.path.realpath(__file__))
 
 
@@ -77,6 +110,12 @@ def is_path_valid(pathname: str) -> bool:
 
     注意：如果路径的某个部分不存在（导致 ENOENT），此函数可能无法捕获
     后续路径组件中的无效名称，因为 os.lstat 会因 ENOENT 而首先失败。
+    
+    Args:
+        pathname (str): 需要检查的路径名
+        
+    Returns:
+        bool: 如果路径有效返回True，否则返回False
     """
     # 1. 初始类型和空值检查
     if not isinstance(pathname, str) or not pathname:
@@ -143,6 +182,12 @@ def sanitize_filename_component(name_component: str) -> str:
 
     返回:
         处理后的安全字符串
+        
+    Args:
+        name_component (str): 需要处理的原始文件名组件
+        
+    Returns:
+        str: 处理后的安全字符串，所有非法字符已被替换为下划线
     """
     if not isinstance(name_component, str):
         raise TypeError("输入必须是字符串类型")
@@ -156,7 +201,16 @@ def sanitize_filename_component(name_component: str) -> str:
 
 # --- 核心逻辑 ---
 def get_save_directory(user_qq: str) -> str:
-    """确定给定用户的照片保存目录"""
+    """确定给定用户的照片保存目录
+    
+    根据配置的下载路径和用户QQ号，构建照片保存的完整目录路径。
+    
+    Args:
+        user_qq (str): 用户的QQ号
+        
+    Returns:
+        str: 照片保存的完整目录路径
+    """
     download_path = APP_CONFIG.get("download_path", "downloads")
     return os.path.join(get_script_directory(), download_path, str(user_qq))
 
@@ -166,6 +220,17 @@ def download_photo_network_helper(
 ) -> requests.Response:
     """
     下载照片的辅助函数，如果需要，首先尝试使用会话下载，然后不使用会话下载。
+    
+    Args:
+        session (requests.Session): requests会话对象，用于保持连接
+        url (str): 照片的下载URL
+        timeout (int): 下载超时时间（秒）
+        
+    Returns:
+        requests.Response: HTTP响应对象
+        
+    Raises:
+        requests.exceptions.RequestException: 当网络请求失败时
     """
     try:
         if session:
@@ -181,6 +246,15 @@ def save_photo_worker(args: tuple) -> None:
     """
     工作函数，用于下载并保存单张照片。
     在线程池中运行。
+    
+    Args:
+        args (tuple): 包含以下元素的元组:
+            - session (requests.Session): requests会话对象
+            - user_qq (str): 用户QQ号
+            - album_index (int): 相册索引
+            - album_name (str): 相册名称
+            - photo_index (int): 照片索引
+            - photo (QzonePhoto): 照片对象
     """
     session, user_qq, album_index, album_name, photo_index, photo = args
 
@@ -259,7 +333,11 @@ def save_photo_worker(args: tuple) -> None:
 
 
 class QzonePhotoManager:
-    """管理 QQ 空间相册和照片的获取与下载。"""
+    """管理 QQ 空间相册和照片的获取与下载。
+    
+    该类负责处理QQ空间的登录、API调用、相册和照片信息获取，
+    以及多线程照片下载等功能。
+    """
 
     # 获取相册列表的API URL模板
     ALBUM_LIST_URL_TEMPLATE = (
@@ -268,6 +346,14 @@ class QzonePhotoManager:
         "&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp"
         "&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1"
         "&idcNum=4&callbackFun=shine0&callback=shine0_Callback"
+    )
+
+    ALBUM_LIST_URL_WITH_PAGE_TEMPLATE = (
+        "https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?"
+        "g_tk={gtk}&t={t}&hostUin={dest_user}&uin={user}"
+        "&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp"
+        "&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1"
+        "&idcNum=4&callbackFun=shine{fn}&mode=2&sortOrder=2&pageStart={pageStart}&pageNum={pageNum}&callback=shine{fn}_Callback"
     )
 
     # 获取照片列表的API URL模板
@@ -281,15 +367,26 @@ class QzonePhotoManager:
     )
 
     def __init__(self, user_qq: str, password: str):
+        """初始化QzonePhotoManager对象。
+        
+        Args:
+            user_qq (str): 用户的QQ号
+            password (str): 用户的QQ密码
+        """
         self.user_qq = str(user_qq)
         self.password = password
         self.cookies = {}
         self.session = requests.Session()  # 使用会话进行后续请求
         self.qzone_g_tk = ""
+        self.total_albums = 0
         self._login_and_get_cookies()
 
     def _login_and_get_cookies(self):
-        """使用 Selenium 登录 QQ 空间以获取必要的 cookie。"""
+        """使用 Selenium 登录 QQ 空间以获取必要的 cookie。
+        
+        通过Selenium启动Chrome浏览器，用户需要在浏览器中手动登录QQ空间。
+        登录成功后，会自动获取并保存必要的cookie信息。
+        """
         driver_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
 
         # 1. 优先从脚本目录查找
@@ -406,14 +503,33 @@ class QzonePhotoManager:
         driver.quit()
 
     def _calculate_g_tk(self, p_skey: str) -> int:
-        """根据 p_skey 计算 g_tk。"""
+        """根据 p_skey 计算 g_tk。
+        
+        g_tk是QQ空间API验证所需的一个参数，通过特定算法计算得出。
+        
+        Args:
+            p_skey (str): 用于计算g_tk的p_skey值
+            
+        Returns:
+            int: 计算得出的g_tk值
+        """
         hash_val = 5381
         for char in p_skey:
             hash_val += (hash_val << 5) + ord(char)
         return hash_val & 0x7FFFFFFF
 
-    def _access_qzone_api(self, url: str, timeout_seconds: int = None) -> dict:
-        """访问 QQ 空间 API 端点并解析 JSONP 响应。"""
+    def _access_qzone_api(self, url: str, timeout_seconds: int | None = None) -> dict:
+        """访问 QQ 空间 API 端点并解析 JSONP 响应。
+        
+        向指定的QQ空间API URL发送GET请求，并解析返回的JSONP格式响应。
+        
+        Args:
+            url (str): API端点URL
+            timeout_seconds (int, optional): 请求超时时间（秒），默认使用配置值
+            
+        Returns:
+            dict: 解析后的API响应数据，如果请求失败则返回空字典
+        """
         if timeout_seconds is None:
             timeout_seconds = APP_CONFIG["timeout_init"]
 
@@ -449,19 +565,63 @@ class QzonePhotoManager:
                 print(f"有问题的完整 JSON 字符串: {json_str}")
             return {}
 
-    def get_albums(self, dest_user_qq: str) -> list[QzoneAlbum]:
-        """获取给定用户的相册列表。"""
+    def get_albums_by_page(self, dest_user_qq: str) -> list[QzoneAlbum]:
+        """分页获取相册列表。
+        
+        通过分页方式获取目标用户的所有相册信息，解决单次请求限制问题。
+        
+        Args:
+            dest_user_qq (str): 目标用户的QQ号
+            
+        Returns:
+            list[QzoneAlbum]: 目标用户的所有相册列表
+        """
+        pageStart = 0
+        allAlbums = []
+        while self.total_albums == 0 or pageStart < self.total_albums:
+            albums = self.get_albums(dest_user_qq, pageStart)
+            if len(albums) == 0:
+                break
+            pageStart += len(albums)
+            allAlbums.extend(albums)
+        return allAlbums
+
+    def get_albums(self, dest_user_qq: str, pageStart: int = 0, pageNum: int = 32) -> list[QzoneAlbum]:
+        """获取给定用户的相册列表。
+        
+        通过QQ空间API获取目标用户指定页码的相册列表信息。
+        
+        Args:
+            dest_user_qq (str): 目标用户的QQ号
+            pageStart (int, optional): 起始页码，默认为0
+            pageNum (int, optional): 每页相册数量，默认为32
+            
+        Returns:
+            list[QzoneAlbum]: 目标用户的相册列表
+        """
         albums = []
-        url = self.ALBUM_LIST_URL_TEMPLATE.format(
-            gtk=self.qzone_g_tk,
-            t=random.random(),
-            dest_user=dest_user_qq,
-            user=self.user_qq,
-        )
+        if pageStart == 0:
+            url = self.ALBUM_LIST_URL_TEMPLATE.format(
+                gtk=self.qzone_g_tk,
+                t=random.random(),
+                dest_user=dest_user_qq,
+                user=self.user_qq,
+            )
+        else:
+            url = self.ALBUM_LIST_URL_WITH_PAGE_TEMPLATE.format(
+                gtk=self.qzone_g_tk,
+                t=random.random(),
+                dest_user=dest_user_qq,
+                user=self.user_qq,
+                pageStart=pageStart,
+                pageNum=pageNum,
+                fn=0
+            )        
         if APP_CONFIG["is_api_debug"]:
             print(f"正在从以下地址获取相册: {url}")
 
         data = self._access_qzone_api(url)
+        
         if APP_CONFIG["is_api_debug"]:
             dump = json.dumps(
                 data,
@@ -474,6 +634,8 @@ class QzonePhotoManager:
             return albums
 
         album_data = data["data"]
+        if self.total_albums == 0:
+            self.total_albums = album_data.get("albumsInUser", 0)
         if "albumListModeSort" in album_data:  # 普通视图
             album_list = album_data["albumListModeSort"]
         elif "albumListModeClass" in album_data:  # 列表视图
@@ -482,6 +644,8 @@ class QzonePhotoManager:
                 for d in album_data["albumListModeClass"]
                 for item in d.get("albumList", [])
             ]
+        elif "albumList" in album_data:
+            album_list = album_data["albumList"]
         else:
             album_list = []
 
@@ -512,7 +676,17 @@ class QzonePhotoManager:
     def get_photos_from_album(
         self, dest_user_qq: str, album: QzoneAlbum
     ) -> list[QzonePhoto]:
-        """从特定相册获取所有照片。"""
+        """从特定相册获取所有照片。
+        
+        获取指定相册中的所有照片信息，支持分页获取大量照片。
+        
+        Args:
+            dest_user_qq (str): 目标用户的QQ号
+            album (QzoneAlbum): 相册对象
+            
+        Returns:
+            list[QzonePhoto]: 相册中的所有照片列表
+        """
         photos = []
         page_start = 0
         page_num_to_fetch = 500  # QQ空间 API 每页限制数量
@@ -608,8 +782,14 @@ class QzonePhotoManager:
         return photos
 
     def download_all_photos_for_user(self, dest_user_qq: str):
-        """下载目标用户所有可访问的照片。"""
-        albums = self.get_albums(dest_user_qq)
+        """下载目标用户所有可访问的照片。
+        
+        下载指定用户的所有可访问相册中的照片，支持多线程下载和断点续传。
+        
+        Args:
+            dest_user_qq (str): 目标用户的QQ号
+        """
+        albums = self.get_albums_by_page(dest_user_qq)
         if not albums:
             print(f"未找到用户 {dest_user_qq} 的相册或无法访问。")
             return
@@ -677,7 +857,14 @@ class QzonePhotoManager:
 
 
 def main():
-    """脚本主入口点。"""
+    """脚本主入口点。
+    
+    程序的主要执行流程：
+    1. 加载配置文件
+    2. 初始化QzonePhotoManager
+    3. 登录QQ空间
+    4. 遍历目标用户列表并下载照片
+    """
     # --- 用户配置 ---
     main_user_qq = USER_CONFIG["main_user_qq"]
     main_user_pass = USER_CONFIG["main_user_pass"]
