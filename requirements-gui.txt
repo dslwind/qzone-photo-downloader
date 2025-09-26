@@ -1,4 +1,4 @@
-selenium
-requests
-webdriver_manager
-PyQt6
+requests>=2.25.1
+selenium>=4.0.0
+webdriver-manager>=3.5.0
+PyQt6>=6.0.0

@@ -295,14 +295,6 @@ class QzonePhotoManager:
         "&idcNum=4&callbackFun=shine0&callback=shine0_Callback"
     )
 
-    ALBUM_LIST_URL_WITH_PAGE_TEMPLATE = (
-        "https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?"
-        "g_tk={gtk}&t={t}&hostUin={dest_user}&uin={user}"
-        "&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp"
-        "&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1"
-        "&idcNum=4&callbackFun=shine{fn}&mode=2&sortOrder=2&pageStart={pageStart}&pageNum={pageNum}&callback=shine{fn}_Callback"
-    )
-
     PHOTO_LIST_URL_TEMPLATE = (
         "https://h5.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/"
         "cgi_list_photo?g_tk={gtk}&t={t}&mode=0&idcNum=4&hostUin={dest_user}"
@@ -312,7 +304,7 @@ class QzonePhotoManager:
         "&callbackFun=shine0&callback=shine0_Callback"
     )
 
-    def __init__(self, user_qq: str, log_signal=None, is_stopped_func=None):
+    def __init__(self, user_qq: str, log_signal: pyqtSignal = None, is_stopped_func: callable = None):
         """
         初始化 QzonePhotoManager。
         """
@@ -322,7 +314,6 @@ class QzonePhotoManager:
         self.qzone_g_tk = ""
         self.log_signal = log_signal
         self.is_stopped_func = is_stopped_func if is_stopped_func is not None else (lambda: False)
-        self.total_albums = 0
 
     def _emit_log(self, message: str):
         """
@@ -330,79 +321,8 @@ class QzonePhotoManager:
         同时使用 logger 记录消息。
         """
         if self.log_signal:
-            self.log_signal.emit(message)  # type: ignore
+            self.log_signal.emit(message)
         logger.info(message)
-
-    def _check_cookie_validity(self) -> bool:
-        """
-        检查当前cookie是否有效。
-        通过尝试访问相册列表API来验证cookie有效性。
-        """
-        if not self.cookies or not self.qzone_g_tk:
-            self._emit_log("Cookie或g_tk为空，无法验证有效性。")
-            return False
-            
-        # 使用相册列表API来检查cookie有效性
-        # 这里使用自己的QQ号作为目标用户来测试cookie是否有效
-        check_url = self.ALBUM_LIST_URL_TEMPLATE.format(
-            gtk=self.qzone_g_tk,
-            t=random.random(),
-            dest_user=self.user_qq,  # 使用自己的QQ号作为目标用户
-            user=self.user_qq,
-        )
-        
-        try:
-            response = self.session.get(check_url, timeout=APP_CONFIG["timeout_init"])
-            response.raise_for_status()
-            
-            # 检查响应内容是否为有效的JSONP格式且不包含错误
-            text_content = response.text
-            if ((text_content.startswith("shine0_Callback(") and text_content.endswith(");")) or
-                (text_content.startswith("_Callback(") and text_content.endswith(");"))):
-                # 尝试解析JSON内容
-                if text_content.startswith("shine0_Callback("):
-                    json_str = text_content[len("shine0_Callback(") : -2]
-                else:
-                    json_str = text_content[len("_Callback(") : -2]
-                
-                try:
-                    data = json.loads(json_str)
-                    # 检查返回码是否为0（成功）
-                    if data.get("code", -1) == 0:
-                        self._emit_log("Cookie验证成功，可以继续使用。")
-                        return True
-                    else:
-                        self._emit_log(f"Cookie验证失败，API返回错误码: {data.get('code', '未知')}")
-                        return False
-                except json.JSONDecodeError:
-                    self._emit_log("Cookie验证失败，无法解析API响应。")
-                    return False
-            else:
-                self._emit_log("Cookie验证失败，API响应格式不正确。")
-                return False
-        except requests.exceptions.RequestException as e:
-            self._emit_log(f"Cookie验证请求失败: {e}")
-            return False
-        except Exception as e:
-            self._emit_log(f"Cookie验证过程中发生错误: {e}")
-            return False
-
-    def _set_cookies_and_gtk(self, cookies: dict, g_tk: str):
-        """
-        设置cookie和g_tk，用于复用已有的登录信息。
-        
-        Args:
-            cookies (dict): cookie字典
-            g_tk (str): g_tk值
-        """
-        self.cookies = cookies
-        self.qzone_g_tk = g_tk
-        
-        # 更新会话中的cookie
-        for cookie_name, cookie_value in self.cookies.items():
-            self.session.cookies.set(cookie_name, cookie_value)
-            
-        self._emit_log("已设置cookie和g_tk。")
 
     def _login_and_get_cookies(self):
         """
@@ -518,7 +438,7 @@ class QzonePhotoManager:
             hash_val += (hash_val << 5) + ord(char)
         return hash_val & 0x7FFFFFFF
 
-    def _access_qzone_api(self, url: str, timeout_seconds: int | None = None) -> dict:
+    def _access_qzone_api(self, url: str, timeout_seconds: int = None) -> dict:
         """访问 QQ 空间 API 端点并解析 JSONP 响应。"""
         if timeout_seconds is None:
             timeout_seconds = APP_CONFIG["timeout_init"]
@@ -556,37 +476,15 @@ class QzonePhotoManager:
                 logger.debug(f"有问题的完整 JSON 字符串: {json_str}")
             return {}
 
-    def get_albums_by_page(self, dest_user_qq: str) -> list[QzoneAlbum]:
-        pageStart = 0
-        allAlbums = []
-        while self.total_albums == 0 or pageStart < self.total_albums:
-            albums = self.get_albums(dest_user_qq, pageStart)
-            if len(albums) == 0:
-                break
-            pageStart += len(albums)
-            allAlbums.extend(albums)
-        return allAlbums
-
-    def get_albums(self, dest_user_qq: str, pageStart: int = 0, pageNum: int = 32) -> list[QzoneAlbum]:
+    def get_albums(self, dest_user_qq: str) -> list[QzoneAlbum]:
         """获取给定用户的相册列表。"""
         albums = []
-        if pageStart == 0:
-            url = self.ALBUM_LIST_URL_TEMPLATE.format(
-                gtk=self.qzone_g_tk,
-                t=random.random(),
-                dest_user=dest_user_qq,
-                user=self.user_qq,
-            )
-        else:
-            url = self.ALBUM_LIST_URL_WITH_PAGE_TEMPLATE.format(
-                gtk=self.qzone_g_tk,
-                t=random.random(),
-                dest_user=dest_user_qq,
-                user=self.user_qq,
-                pageStart=pageStart,
-                pageNum=pageNum,
-                fn=0
-            )        
+        url = self.ALBUM_LIST_URL_TEMPLATE.format(
+            gtk=self.qzone_g_tk,
+            t=random.random(),
+            dest_user=dest_user_qq,
+            user=self.user_qq,
+        )
         if APP_CONFIG["is_api_debug"]:
             self._emit_log(f"正在从以下地址获取相册: {url}")
             logger.debug(f"正在从以下地址获取相册: {url}")
@@ -606,18 +504,14 @@ class QzonePhotoManager:
             return albums
 
         album_data = data["data"]
-        if self.total_albums == 0:
-            self.total_albums = album_data.get("albumsInUser", 0)
-        if "albumListModeSort" in album_data:  # 普通视图
+        if "albumListModeSort" in album_data:
             album_list = album_data["albumListModeSort"]
-        elif "albumListModeClass" in album_data:  # 列表视图
+        elif "albumListModeClass" in album_data:
             album_list = [
                 item
                 for d in album_data["albumListModeClass"]
                 for item in d.get("albumList", [])
             ]
-        elif "albumList" in album_data:
-            album_list = album_data["albumList"]
         else:
             album_list = []
 
@@ -766,13 +660,13 @@ class QzonePhotoManager:
 
         return photos
 
-    def download_all_photos_for_user(self, dest_user_qq: str, progress_signal):
+    def download_all_photos_for_user(self, dest_user_qq: str, progress_signal: pyqtSignal):
         """下载目标用户所有可访问的照片。"""
-        albums = self.get_albums_by_page(dest_user_qq)
+        albums = self.get_albums(dest_user_qq)
         if not albums:
             self._emit_log(f"未找到用户 {dest_user_qq} 的相册或无法访问。")
             logger.info(f"未找到用户 {dest_user_qq} 的相册或无法访问。")
-            progress_signal.emit(0)  # type: ignore
+            progress_signal.emit(0)
             return
 
         self._emit_log(f"为用户 {dest_user_qq} 找到 {len(albums)} 个相册:")
@@ -848,7 +742,7 @@ class QzonePhotoManager:
         if not all_photo_tasks:
             self._emit_log(f"没有为用户 {dest_user_qq} 下载的照片。")
             logger.info(f"没有为用户 {dest_user_qq} 下载的照片。")
-            progress_signal.emit(0)  # type: ignore
+            progress_signal.emit(0)
             return
 
         self._emit_log(
@@ -857,7 +751,7 @@ class QzonePhotoManager:
         logger.info(
             f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程..."
         )
-        progress_signal.emit(-len(all_photo_tasks))  # type: ignore
+        progress_signal.emit(-len(all_photo_tasks))
 
         with ThreadPoolExecutor(max_workers=APP_CONFIG["max_workers"]) as executor:
             list(executor.map(save_photo_worker, all_photo_tasks))
@@ -885,8 +779,6 @@ class DownloadWorker(QThread):
         self.dest_users_qq = dest_users_qq
         self.qzone_manager = None
         self._is_stopped = False
-        # 保存上一次使用的QzonePhotoManager实例，用于复用cookie
-        self.previous_qzone_manager = None
 
     def stop(self):
         """设置停止标志，请求线程停止。"""
@@ -901,33 +793,10 @@ class DownloadWorker(QThread):
         """线程的主要执行方法。"""
         try:
             self.log_signal.emit("正在初始化下载管理器并尝试登录...")
+            self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
             
-            # 检查是否可以复用之前的cookie
-            reuse_cookie = False
-            if (self.previous_qzone_manager and 
-                self.previous_qzone_manager.user_qq == self.main_user_qq and
-                self.previous_qzone_manager.cookies):
-                
-                self.log_signal.emit("检测到已存在的登录信息，正在验证cookie有效性...")
-                if self.previous_qzone_manager._check_cookie_validity():
-                    # 复用之前的QzonePhotoManager
-                    self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
-                    self.qzone_manager._set_cookies_and_gtk(
-                        self.previous_qzone_manager.cookies, 
-                        str(self.previous_qzone_manager.qzone_g_tk)  # 确保g_tk是字符串类型
-                    )
-                    reuse_cookie = True
-                    self.log_signal.emit("之前的cookie仍然有效，直接使用。")
-                else:
-                    self.log_signal.emit("之前的cookie已失效，需要重新登录。")
-            
-            # 如果不能复用cookie，则创建新的QzonePhotoManager并登录
-            if not reuse_cookie:
-                self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
-                if not self.is_stopped():
-                    self.qzone_manager._login_and_get_cookies()
-            
-            if not self.is_stopped() and self.qzone_manager:
+            if not self.is_stopped():
+                self.qzone_manager._login_and_get_cookies()
                 self.log_signal.emit("登录过程已完成。")
             else:
                 self.log_signal.emit("启动前已收到停止请求，跳过登录。")
@@ -944,8 +813,7 @@ class DownloadWorker(QThread):
                 target_qq_str = str(target_qq)
                 self.log_signal.emit(f"\n--- 正在处理用户: {target_qq_str} ---")
                 try:
-                    if self.qzone_manager:  # 确保qzone_manager不为None
-                        self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
+                    self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
                 except Exception as e:
                     self.log_signal.emit(f"处理用户 {target_qq_str} 时发生意外错误: {e}")
                     self.log_signal.emit(traceback.format_exc())
@@ -957,18 +825,8 @@ class DownloadWorker(QThread):
                 self.log_signal.emit("\n所有指定用户处理完毕。")
                 logger.info("所有指定用户处理完毕。")
             else:
-                self.log_signal.emit("下载已停止。")
+                self.log_output.append("下载已停止。")
                 logger.info("下载已停止。")
-
-        except Exception as e:
-            self.log_signal.emit(f"下载过程中发生关键错误: {e}")
-            self.log_signal.emit(traceback.format_exc())
-            logger.exception("下载过程中发生关键错误。")
-        finally:
-            # 保存当前的QzonePhotoManager实例，供下次使用
-            if self.qzone_manager:
-                self.previous_qzone_manager = self.qzone_manager
-            self.finished_signal.emit("All")
 
 
 class QzoneDownloaderGUI(QWidget):
@@ -1139,10 +997,7 @@ class QzoneDownloaderGUI(QWidget):
         self.log_output.append("开始下载任务...")
         logger.info("开始下载任务...")
 
-        # 传递previous_qzone_manager给新的DownloadWorker实例
-        previous_qzone_manager = self.worker_thread.previous_qzone_manager if self.worker_thread else None
         self.worker_thread = DownloadWorker(main_qq, main_pass, dest_qqs)
-        self.worker_thread.previous_qzone_manager = previous_qzone_manager
         self.worker_thread.log_signal.connect(self.update_log)
         self.worker_thread.progress_signal.connect(self.update_progress)
         self.worker_thread.finished_signal.connect(self.on_download_finished)
@@ -1164,9 +1019,7 @@ class QzoneDownloaderGUI(QWidget):
     def update_log(self, message: str):
         """将消息附加到日志输出区域。"""
         self.log_output.append(message)
-        scrollbar = self.log_output.verticalScrollBar()
-        if scrollbar:
-            scrollbar.setValue(scrollbar.maximum())
+        self.log_output.verticalScrollBar().setValue(self.log_output.verticalScrollBar().maximum())
 
     def update_progress(self, value: int):
         """
@@ -1207,6 +1060,7 @@ class QzoneDownloaderGUI(QWidget):
             self.log_output.append(f"用户 {user_qq_or_all} 的照片下载完成。")
             logger.info(f"用户 {user_qq_or_all} 的照片下载完成。")
 
+
 class GuiLogHandler(logging.Handler):
     """一个自定义的日志处理器，用于将日志消息发送到 PyQt 的 QTextEdit 控件。"""
     def __init__(self, text_widget):
@@ -1229,8 +1083,27 @@ class GuiLogHandler(logging.Handler):
             self.text_widget.append(message)
             self.text_widget.verticalScrollBar().setValue(self.text_widget.verticalScrollBar().maximum())
 
+
+"""
+QQ空间相册照片下载器 - GUI兼容层
+"""
+
+# 为了向后兼容，这里导入新的模块结构
+try:
+    # 尝试从新的模块结构导入
+    from gui.main_window import QzoneDownloaderGUI
+except ImportError:
+    # 如果新的导入失败，使用旧的实现
+    pass
+
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    gui = QzoneDownloaderGUI()
-    gui.show()
-    sys.exit(app.exec())
+    import sys
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication(sys.argv)
+        gui = QzoneDownloaderGUI()
+        gui.show()
+        sys.exit(app.exec())
+    except Exception as e:
+        print(f"启动GUI时发生错误: {e}")
+        sys.exit(1)
