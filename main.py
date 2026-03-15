@@ -195,120 +195,134 @@ def write_exif_to_photo(
       ExposureBiasValue    ← exif.exposureCompensation
       LensModel            ← exif.lensModel
     """
+    if file_path.lower().endswith((".jpg", ".jpeg")):
+        try:
+            try:
+                exif_dict = piexif.load(file_path)
+            except Exception:
+                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+
+            zeroth = exif_dict.setdefault("0th", {})
+            exif   = exif_dict.setdefault("Exif", {})
+
+            # --- 相机厂商 / 完整型号 ---
+            make       = (exif_data.get("make")  or "").strip()
+            exif_model = (exif_data.get("model") or "").strip()
+            cameratype = (cameratype or "").strip()
+
+            # 若 exif.make 为空，尝试从 cameratype 首个已知品牌前缀提取
+            extracted_brand = ""
+            if not make and cameratype:
+                known_makes = [
+                    "Apple", "Samsung", "SONY", "HUAWEI", "Xiaomi", "ASUS",
+                    "Google", "OnePlus", "OPPO", "vivo", "Canon", "Nikon",
+                    "Fujifilm", "Panasonic", "Leica", "DJI", "GoPro",
+                ]
+                for brand in known_makes:
+                    if cameratype.startswith(brand):
+                        extracted_brand = brand
+                        make = brand
+                        break
+
+            # Model：优先 exif.model，退回 cameratype
+            # 若从 cameratype 提取了品牌，Model 只写品牌之后的部分，避免与 Make 重复
+            if exif_model:
+                zeroth[piexif.ImageIFD.Model] = _ascii_bytes(exif_model)
+            elif cameratype:
+                model_str = cameratype[len(extracted_brand):].strip() if extracted_brand else cameratype
+                if model_str:
+                    zeroth[piexif.ImageIFD.Model] = _ascii_bytes(model_str)
+
+            if make:
+                zeroth[piexif.ImageIFD.Make] = _ascii_bytes(make)
+
+
+            # --- 拍摄时间 → DateTimeOriginal ---
+            # 优先使用 exif.originalTime（来自相机固件，最准确）
+            original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
+            if original_time:
+                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
+            elif shoottime:
+                # 退回到 rawshoottime
+                shoot_exif = _datetime_str_to_exif(shoottime)
+                if shoot_exif:
+                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+            else:
+                shoot_exif = _datetime_str_to_exif(uploadtime)
+                if shoot_exif:
+                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+
+            # --- 曝光时间 ---
+            r = _str_to_rational(exif_data.get("exposureTime", ""))
+            if r:
+                exif[piexif.ExifIFD.ExposureTime] = r
+
+            # --- 光圈值 ---
+            r = _str_to_rational(exif_data.get("fnumber", ""))
+            if r:
+                exif[piexif.ExifIFD.FNumber] = r
+
+            # --- ISO ---
+            iso = _str_to_short(exif_data.get("iso", ""))
+            if iso is not None:
+                exif[piexif.ExifIFD.ISOSpeedRatings] = iso
+
+            # --- 焦距 ---
+            r = _str_to_rational(exif_data.get("focalLength", ""))
+            if r:
+                exif[piexif.ExifIFD.FocalLength] = r
+
+            # --- 闪光灯 ---
+            flash = _str_to_short(exif_data.get("flash", ""))
+            if flash is not None:
+                exif[piexif.ExifIFD.Flash] = flash
+
+            # --- 曝光模式 ---
+            em = _str_to_short(exif_data.get("exposureMode", ""))
+            if em is not None:
+                exif[piexif.ExifIFD.ExposureMode] = em
+
+            # --- 曝光程序 ---
+            ep = _str_to_short(exif_data.get("exposureProgram", ""))
+            if ep is not None:
+                exif[piexif.ExifIFD.ExposureProgram] = ep
+
+            # --- 测光模式 ---
+            mm = _str_to_short(exif_data.get("meteringMode", ""))
+            if mm is not None:
+                exif[piexif.ExifIFD.MeteringMode] = mm
+
+            # --- 曝光补偿 ---
+            sr = _str_to_srational(exif_data.get("exposureCompensation", ""))
+            if sr is not None:
+                exif[piexif.ExifIFD.ExposureBiasValue] = sr
+
+            # --- 镜头型号 ---
+            lens = (exif_data.get("lensModel") or "").strip()
+            if lens:
+                exif[piexif.ExifIFD.LensModel] = _ascii_bytes(lens)
+
+            exif_bytes = piexif.dump(exif_dict)
+            piexif.insert(exif_bytes, file_path)
+
+        except Exception as e:
+            print(f"[EXIF] 回写失败，文件 {file_path}: {e}")
+
+    dt_str = (
+        _datetime_str_to_exif(exif_data.get("originalTime", ""))
+        or _datetime_str_to_exif(shoottime)
+        or _datetime_str_to_exif(uploadtime)
+    )
+    if dt_str:
+        try:
+            import time
+            t = time.mktime(time.strptime(dt_str, "%Y:%m:%d %H:%M:%S"))
+            os.utime(file_path, (t, t))
+        except Exception as e:
+            print(f"[mtime] 写入文件修改日期失败，文件 {file_path}: {e}")
+
     if not file_path.lower().endswith((".jpg", ".jpeg")):
         return
-
-    try:
-        try:
-            exif_dict = piexif.load(file_path)
-        except Exception:
-            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
-
-        zeroth = exif_dict.setdefault("0th", {})
-        exif   = exif_dict.setdefault("Exif", {})
-
-        # --- 相机厂商 / 完整型号 ---
-        make       = (exif_data.get("make")  or "").strip()
-        exif_model = (exif_data.get("model") or "").strip()
-        cameratype = (cameratype or "").strip()
-
-        # 若 exif.make 为空，尝试从 cameratype 首个已知品牌前缀提取
-        extracted_brand = ""
-        if not make and cameratype:
-            known_makes = [
-                "Apple", "Samsung", "SONY", "HUAWEI", "Xiaomi", "ASUS",
-                "Google", "OnePlus", "OPPO", "vivo", "Canon", "Nikon",
-                "Fujifilm", "Panasonic", "Leica", "DJI", "GoPro",
-            ]
-            for brand in known_makes:
-                if cameratype.startswith(brand):
-                    extracted_brand = brand
-                    make = brand
-                    break
-
-        # Model：优先 exif.model，退回 cameratype
-        # 若从 cameratype 提取了品牌，Model 只写品牌之后的部分，避免与 Make 重复
-        if exif_model:
-            zeroth[piexif.ImageIFD.Model] = _ascii_bytes(exif_model)
-        elif cameratype:
-            model_str = cameratype[len(extracted_brand):].strip() if extracted_brand else cameratype
-            if model_str:
-                zeroth[piexif.ImageIFD.Model] = _ascii_bytes(model_str)
-
-        if make:
-            zeroth[piexif.ImageIFD.Make] = _ascii_bytes(make)
-
-
-        # --- 拍摄时间 → DateTimeOriginal ---
-        # 优先使用 exif.originalTime（来自相机固件，最准确）
-        original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
-        if original_time:
-            exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
-        elif shoottime:
-            # 退回到 rawshoottime
-            shoot_exif = _datetime_str_to_exif(shoottime)
-            if shoot_exif:
-                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
-        else:
-            shoot_exif = _datetime_str_to_exif(uploadtime)
-            if shoot_exif:
-                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
-
-        # --- 曝光时间 ---
-        r = _str_to_rational(exif_data.get("exposureTime", ""))
-        if r:
-            exif[piexif.ExifIFD.ExposureTime] = r
-
-        # --- 光圈值 ---
-        r = _str_to_rational(exif_data.get("fnumber", ""))
-        if r:
-            exif[piexif.ExifIFD.FNumber] = r
-
-        # --- ISO ---
-        iso = _str_to_short(exif_data.get("iso", ""))
-        if iso is not None:
-            exif[piexif.ExifIFD.ISOSpeedRatings] = iso
-
-        # --- 焦距 ---
-        r = _str_to_rational(exif_data.get("focalLength", ""))
-        if r:
-            exif[piexif.ExifIFD.FocalLength] = r
-
-        # --- 闪光灯 ---
-        flash = _str_to_short(exif_data.get("flash", ""))
-        if flash is not None:
-            exif[piexif.ExifIFD.Flash] = flash
-
-        # --- 曝光模式 ---
-        em = _str_to_short(exif_data.get("exposureMode", ""))
-        if em is not None:
-            exif[piexif.ExifIFD.ExposureMode] = em
-
-        # --- 曝光程序 ---
-        ep = _str_to_short(exif_data.get("exposureProgram", ""))
-        if ep is not None:
-            exif[piexif.ExifIFD.ExposureProgram] = ep
-
-        # --- 测光模式 ---
-        mm = _str_to_short(exif_data.get("meteringMode", ""))
-        if mm is not None:
-            exif[piexif.ExifIFD.MeteringMode] = mm
-
-        # --- 曝光补偿 ---
-        sr = _str_to_srational(exif_data.get("exposureCompensation", ""))
-        if sr is not None:
-            exif[piexif.ExifIFD.ExposureBiasValue] = sr
-
-        # --- 镜头型号 ---
-        lens = (exif_data.get("lensModel") or "").strip()
-        if lens:
-            exif[piexif.ExifIFD.LensModel] = _ascii_bytes(lens)
-
-        exif_bytes = piexif.dump(exif_dict)
-        piexif.insert(exif_bytes, file_path)
-
-    except Exception as e:
-        print(f"[EXIF] 回写失败，文件 {file_path}: {e}")
 
 
 def get_script_directory() -> str:
