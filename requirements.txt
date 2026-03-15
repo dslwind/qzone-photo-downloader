@@ -2,3 +2,4 @@ selenium
 requests
 webdriver_manager
 piexif
+json_repair

@@ -1,5 +1,6 @@
 import errno
 import json
+import json_repair
 import logging
 import os
 import random
@@ -808,6 +809,14 @@ class QzonePhotoManager:
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
+            logger.warning(f"JSON 解码失败，尝试修复: {e}")
+            try:
+                repaired = json_repair.repair_json(json_str, return_objects=True)
+                if repaired:
+                    logger.warning(f"JSON 修复成功")
+                    return repaired
+            except Exception as repair_err:
+                logger.error(f"JSON 修复也失败: {repair_err}")
             self._emit_log(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
             logger.error(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
             if APP_CONFIG["is_api_debug"]:

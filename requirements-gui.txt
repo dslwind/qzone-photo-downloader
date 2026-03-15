@@ -3,3 +3,4 @@ requests
 webdriver_manager
 PyQt6
 piexif
+json_repair
