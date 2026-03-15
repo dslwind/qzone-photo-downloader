@@ -113,9 +113,10 @@ def _str_to_rational(value_str: str) -> tuple | None:
         s = value_str.strip()
         if "/" in s:
             num, den = s.split("/", 1)
-            return (int(num), int(den))
+            num, den = int(num), int(den)
+            return None if num < 0 or den <= 0 else (num, den)  # ← 过滤负值和零分母
         frac = Fraction(float(s)).limit_denominator(1_000_000)
-        return (frac.numerator, frac.denominator)
+        return None if frac < 0 else (frac.numerator, frac.denominator)  # ← 过滤负值
     except Exception:
         return None
 
@@ -133,7 +134,8 @@ def _str_to_short(value_str: str) -> int | None:
     if not value_str or not value_str.strip():
         return None
     try:
-        return int(float(value_str.strip()))
+        v = int(float(value_str.strip()))
+        return None if v < 0 else v  # ← 过滤负值
     except Exception:
         return None
 
