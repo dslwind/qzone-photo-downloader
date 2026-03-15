@@ -859,9 +859,10 @@ class QzonePhotoManager:
                 break
 
             for photo_data in photo_list_data:
-                # 优先使用 'raw' 获取原始图片，备选 'url' 或 'sloc' (小图位置)
+                # 优先使用 'raw' 获取原始图片，备选 'origin_url'、'url' 或 'sloc' (小图位置)
                 pic_url = (
                     photo_data.get("raw")
+                    or photo_data.get("origin_url")
                     or photo_data.get("url")
                     or photo_data.get("custom_url")
                 )

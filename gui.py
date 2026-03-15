@@ -857,6 +857,7 @@ class QzonePhotoManager:
                     return photos
                 pic_url = (
                     photo_data.get("raw")
+                    or photo_data.get("origin_url")
                     or photo_data.get("url")
                     or photo_data.get("custom_url")
                 )
