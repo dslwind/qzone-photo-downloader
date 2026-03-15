@@ -25,7 +25,9 @@ import shutil
 import sys
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 
+import piexif
 import requests
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
@@ -89,10 +91,217 @@ USER_CONFIG = {
 # QQ空间相册对象，包含相册ID, 相册名, 照片数量
 QzoneAlbum = namedtuple("QzoneAlbum", ["uid", "name", "count"])
 # QQ空间照片对象，包含照片链接, 照片名, 所属相册名, 是否为视频, 照片唯一标识
-QzonePhoto = namedtuple("QzonePhoto", ["url", "name", "album_name", "is_video", "pic_key"])
+QzonePhoto = namedtuple("QzonePhoto", [
+    "url", "name", "album_name", "is_video", "pic_key",
+    "exif_data",    # dict，来自 photo_data["exif"]
+    "shoottime",    # str，来自 rawshoottime，含时分秒
+    "cameratype",   # str，完整设备名，如 "Apple iPhone 15 Pro Max"
+])
 
 
-# --- 工具函数---
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+def _str_to_rational(value_str: str) -> tuple | None:
+    """将字符串转为 EXIF rational 元组 (分子, 分母)。"""
+    if not value_str or not value_str.strip():
+        return None
+    try:
+        s = value_str.strip()
+        if "/" in s:
+            num, den = s.split("/", 1)
+            return (int(num), int(den))
+        frac = Fraction(float(s)).limit_denominator(1_000_000)
+        return (frac.numerator, frac.denominator)
+    except Exception:
+        return None
+
+
+def _str_to_srational(value_str: str) -> tuple | None:
+    """将字符串转为 EXIF signed rational 元组。"""
+    r = _str_to_rational(value_str)
+    if r is None:
+        return None
+    return (int(r[0]), int(r[1]))
+
+
+def _str_to_short(value_str: str) -> int | None:
+    """将字符串转为 EXIF SHORT 整数。"""
+    if not value_str or not value_str.strip():
+        return None
+    try:
+        return int(float(value_str.strip()))
+    except Exception:
+        return None
+
+
+def _ascii_bytes(s: str) -> bytes:
+    """编码为 ASCII bytes，非 ASCII 字符用 ? 替换。"""
+    return s.encode("ascii", errors="replace")
+
+
+def _datetime_str_to_exif(dt_str: str) -> str | None:
+    """
+    将 API 返回的时间字符串转换为 EXIF 标准格式 "YYYY:MM:DD HH:MM:SS"。
+    支持：
+      - "2024-11-24 17:42:10"（rawshoottime 格式）
+      - "2024:11:24 17:42:10"（exif.originalTime 格式，已是标准格式）
+    """
+    if not dt_str or not str(dt_str).strip() or str(dt_str).strip() == "0":
+        return None
+    s = str(dt_str).strip()
+    # 已是 EXIF 格式
+    if re.match(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$", s):
+        return s
+    # "YYYY-MM-DD HH:MM:SS" 格式
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$", s)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} {m.group(4)}"
+    # 仅日期 "YYYY-MM-DD"
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} 00:00:00"
+    return None
+
+
+def write_exif_to_photo(
+    file_path: str,
+    exif_data: dict,
+    shoottime: str,
+    cameratype: str = "",
+) -> None:
+    """
+    将 API 返回的元数据回写至 JPEG 文件的 EXIF。
+    仅对 .jpeg/.jpg 文件有效，出错时静默跳过。
+
+    写入字段一览：
+      Make                 ← exif.make，或从 cameratype 首个品牌词提取
+      Model                ← cameratype（优先，完整设备名）或 exif.model
+      DateTimeOriginal     ← exif.originalTime（优先）或 rawshoottime
+      ExposureTime         ← exif.exposureTime
+      FNumber              ← exif.fnumber
+      ISOSpeedRatings      ← exif.iso
+      FocalLength          ← exif.focalLength
+      Flash                ← exif.flash
+      ExposureMode         ← exif.exposureMode
+      ExposureProgram      ← exif.exposureProgram
+      MeteringMode         ← exif.meteringMode
+      ExposureBiasValue    ← exif.exposureCompensation
+      LensModel            ← exif.lensModel
+    """
+    if not file_path.lower().endswith((".jpg", ".jpeg")):
+        return
+
+    try:
+        try:
+            exif_dict = piexif.load(file_path)
+        except Exception:
+            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+
+        zeroth = exif_dict.setdefault("0th", {})
+        exif   = exif_dict.setdefault("Exif", {})
+
+        # --- 相机厂商 / 完整型号 ---
+        make       = (exif_data.get("make")  or "").strip()
+        exif_model = (exif_data.get("model") or "").strip()
+        cameratype = (cameratype or "").strip()
+
+        # 若 exif.make 为空，尝试从 cameratype 首个已知品牌前缀提取
+        extracted_brand = ""
+        if not make and cameratype:
+            known_makes = [
+                "Apple", "Samsung", "SONY", "HUAWEI", "Xiaomi", "ASUS",
+                "Google", "OnePlus", "OPPO", "vivo", "Canon", "Nikon",
+                "Fujifilm", "Panasonic", "Leica", "DJI", "GoPro",
+            ]
+            for brand in known_makes:
+                if cameratype.startswith(brand):
+                    extracted_brand = brand
+                    make = brand
+                    break
+
+        # Model：优先 exif.model，退回 cameratype
+        # 若从 cameratype 提取了品牌，Model 只写品牌之后的部分，避免与 Make 重复
+        if exif_model:
+            zeroth[piexif.ImageIFD.Model] = _ascii_bytes(exif_model)
+        elif cameratype:
+            model_str = cameratype[len(extracted_brand):].strip() if extracted_brand else cameratype
+            if model_str:
+                zeroth[piexif.ImageIFD.Model] = _ascii_bytes(model_str)
+
+        if make:
+            zeroth[piexif.ImageIFD.Make] = _ascii_bytes(make)
+
+
+        # --- 拍摄时间 → DateTimeOriginal ---
+        # 优先使用 exif.originalTime（来自相机固件，最准确）
+        original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
+        if original_time:
+            exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
+        else:
+            # 退回到 rawshoottime
+            shoot_exif = _datetime_str_to_exif(shoottime)
+            if shoot_exif:
+                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+
+        # --- 曝光时间 ---
+        r = _str_to_rational(exif_data.get("exposureTime", ""))
+        if r:
+            exif[piexif.ExifIFD.ExposureTime] = r
+
+        # --- 光圈值 ---
+        r = _str_to_rational(exif_data.get("fnumber", ""))
+        if r:
+            exif[piexif.ExifIFD.FNumber] = r
+
+        # --- ISO ---
+        iso = _str_to_short(exif_data.get("iso", ""))
+        if iso is not None:
+            exif[piexif.ExifIFD.ISOSpeedRatings] = iso
+
+        # --- 焦距 ---
+        r = _str_to_rational(exif_data.get("focalLength", ""))
+        if r:
+            exif[piexif.ExifIFD.FocalLength] = r
+
+        # --- 闪光灯 ---
+        flash = _str_to_short(exif_data.get("flash", ""))
+        if flash is not None:
+            exif[piexif.ExifIFD.Flash] = flash
+
+        # --- 曝光模式 ---
+        em = _str_to_short(exif_data.get("exposureMode", ""))
+        if em is not None:
+            exif[piexif.ExifIFD.ExposureMode] = em
+
+        # --- 曝光程序 ---
+        ep = _str_to_short(exif_data.get("exposureProgram", ""))
+        if ep is not None:
+            exif[piexif.ExifIFD.ExposureProgram] = ep
+
+        # --- 测光模式 ---
+        mm = _str_to_short(exif_data.get("meteringMode", ""))
+        if mm is not None:
+            exif[piexif.ExifIFD.MeteringMode] = mm
+
+        # --- 曝光补偿 ---
+        sr = _str_to_srational(exif_data.get("exposureCompensation", ""))
+        if sr is not None:
+            exif[piexif.ExifIFD.ExposureBiasValue] = sr
+
+        # --- 镜头型号 ---
+        lens = (exif_data.get("lensModel") or "").strip()
+        if lens:
+            exif[piexif.ExifIFD.LensModel] = _ascii_bytes(lens)
+
+        exif_bytes = piexif.dump(exif_dict)
+        piexif.insert(exif_bytes, file_path)
+
+    except Exception as e:
+        logger.warning(f"[EXIF] 回写失败，文件 {file_path}: {e}")
+
+
 def get_script_directory() -> str:
     """获取脚本文件所在的绝对路径。
     
@@ -323,6 +532,13 @@ def save_photo_worker(args: tuple) -> None:
 
             with open(full_photo_path, "wb") as f:
                 f.write(response.content)
+                # EXIF 回写（仅对 .jpeg/.jpg 有效，视频 .mp4 会被内部静默跳过）
+                write_exif_to_photo(
+                    full_photo_path,
+                    photo.exif_data,
+                    photo.shoottime,
+                    photo.cameratype,
+                )
             print(
                 f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s"
             )
@@ -893,6 +1109,9 @@ class QzonePhotoManager:
                             or photo_data.get("phototype") == "video"
                         ),  # 判断是否为视频
                         pic_key=pic_key,  # 添加pic_key字段
+                        exif_data=photo_data.get("exif", {}),
+                        shoottime=photo_data.get("rawshoottime", ""),
+                        cameratype=photo_data.get("cameratype", "").strip(),
                     )
                 )
 

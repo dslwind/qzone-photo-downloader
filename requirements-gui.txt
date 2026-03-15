@@ -2,3 +2,4 @@ selenium
 requests
 webdriver_manager
 PyQt6
+piexif
