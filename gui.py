@@ -95,6 +95,7 @@ QzonePhoto = namedtuple("QzonePhoto", [
     "url", "name", "album_name", "is_video", "pic_key",
     "exif_data",    # dict，来自 photo_data["exif"]
     "shoottime",    # str，来自 rawshoottime，含时分秒
+    "uploadtime",   # str，来自 uploadtime，含时分秒
     "cameratype",   # str，完整设备名，如 "Apple iPhone 15 Pro Max"
 ])
 
@@ -145,7 +146,7 @@ def _datetime_str_to_exif(dt_str: str) -> str | None:
     """
     将 API 返回的时间字符串转换为 EXIF 标准格式 "YYYY:MM:DD HH:MM:SS"。
     支持：
-      - "2024-11-24 17:42:10"（rawshoottime 格式）
+      - "2024-11-24 17:42:10"（rawshoottime、uploadtime 格式）
       - "2024:11:24 17:42:10"（exif.originalTime 格式，已是标准格式）
     """
     if not dt_str or not str(dt_str).strip() or str(dt_str).strip() == "0":
@@ -169,6 +170,7 @@ def write_exif_to_photo(
     file_path: str,
     exif_data: dict,
     shoottime: str,
+    uploadtime: str,
     cameratype: str = "",
 ) -> None:
     """
@@ -177,8 +179,8 @@ def write_exif_to_photo(
 
     写入字段一览：
       Make                 ← exif.make，或从 cameratype 首个品牌词提取
-      Model                ← cameratype（优先，完整设备名）或 exif.model
-      DateTimeOriginal     ← exif.originalTime（优先）或 rawshoottime
+      Model                ← exif.model 或 cameratype
+      DateTimeOriginal     ← exif.originalTime（优先）或 rawshoottime、uploadtime
       ExposureTime         ← exif.exposureTime
       FNumber              ← exif.fnumber
       ISOSpeedRatings      ← exif.iso
@@ -239,9 +241,13 @@ def write_exif_to_photo(
         original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
         if original_time:
             exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
-        else:
+        elif shoottime:
             # 退回到 rawshoottime
             shoot_exif = _datetime_str_to_exif(shoottime)
+            if shoot_exif:
+                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+        else:
+            shoot_exif = _datetime_str_to_exif(uploadtime)
             if shoot_exif:
                 exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
 
@@ -477,6 +483,7 @@ def save_photo_worker(args: tuple) -> None:
                 full_photo_path,
                 photo.exif_data,
                 photo.shoottime,
+                photo.uploadtime,
                 photo.cameratype,
             )
 
@@ -1122,6 +1129,7 @@ class QzonePhotoManager:
                         pic_key=pic_key,
                         exif_data=photo_data.get("exif", {}),
                         shoottime=photo_data.get("rawshoottime", ""),
+                        uploadtime=photo_data.get("uploadtime", ""),
                         cameratype=photo_data.get("cameratype", "").strip(),
                     )
                 )
