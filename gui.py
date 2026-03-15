@@ -381,6 +381,18 @@ def sanitize_filename_component(name_component: str) -> str:
     illegal_chars = r'[\/\\:*?"<>|\0]'
     return re.sub(illegal_chars, "_", name_component)
 
+def _detect_image_extension(content: bytes) -> str:
+    """通过文件头魔术字节判断图片格式，返回对应扩展名。"""
+    if content[:3] == b'\xff\xd8\xff':
+        return ".jpeg"
+    if content[:4] == b'\x89PNG':
+        return ".png"
+    if content[:6] in (b'GIF87a', b'GIF89a'):
+        return ".gif"
+    if content[:4] == b'RIFF' and content[8:12] == b'WEBP':
+        return ".webp"
+    # 兜底仍用 jpeg
+    return ".jpeg"
 
 def get_save_directory(user_qq: str) -> str:
     """确定给定用户的照片保存目录。"""
@@ -444,34 +456,20 @@ def save_photo_worker(args: tuple) -> None:
         if video_url:
             download_url = video_url
             file_extension = ".mp4"
-            log_signal.emit(f"[成功] 获取到视频下载链接")
-            logger.info(f"[成功] 获取到视频下载链接")
+            final_filename = f"{base_filename}{file_extension}"
+            full_photo_path = os.path.join(album_save_path, final_filename)
+            log_signal.emit(f"[成功] 获取到视频{base_filename}下载链接")
+            logger.info(f"[成功] 获取到视频{base_filename}下载链接")
         else:
-            log_signal.emit(f"[失败] 无法获取视频下载链接，将下载视频封面图代替")
-            logger.warning(f"[失败] 无法获取视频下载链接，将下载视频封面图代替: {photo.name}")
+            log_signal.emit(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替")
+            logger.warning(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替: {photo.name}")
             base_filename = f"{photo_index}_{photo_name_sanitized}_视频封面"
-
-    final_filename = f"{base_filename}{file_extension}"
-    full_photo_path = os.path.join(album_save_path, final_filename)
-
-    if not is_path_valid(full_photo_path):
-        log_signal.emit(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-        logger.warning(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-        final_filename = f"random_name_{album_index}_{photo_index}.jpeg"
-        full_photo_path = os.path.join(album_save_path, final_filename)
-        if not is_path_valid(full_photo_path):
-            log_signal.emit(f"[错误] 备用文件名也无效: {final_filename}。跳过照片: {photo.url}")
-            logger.error(f"[错误] 备用文件名也无效: {final_filename}。跳过照片: {photo.url}")
-            progress_signal.emit(1)
-            return
-
-    if os.path.exists(full_photo_path):
-        log_signal.emit(
-            f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')"
-        )
-        logger.info(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
-        progress_signal.emit(1)
-        return
+            final_filename = ""
+            full_photo_path = ""
+    else:
+        # 照片：先下载，检测扩展名后再做路径检查
+        final_filename = ""
+        full_photo_path = ""
 
     url = download_url.replace("\\", "")
     attempts = 0
@@ -491,6 +489,29 @@ def save_photo_worker(args: tuple) -> None:
         try:
             response = download_photo_network_helper(session, url, current_timeout)
             response.raise_for_status()
+
+            if not (photo.is_video and file_extension == ".mp4"):
+                # 此时才能确定扩展名和最终路径
+                file_extension = _detect_image_extension(response.content)
+                final_filename = f"{base_filename}{file_extension}"
+                full_photo_path = os.path.join(album_save_path, final_filename)
+
+                if not is_path_valid(full_photo_path):
+                    log_signal.emit(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
+                    logger.warning(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
+                    final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
+                    full_photo_path = os.path.join(album_save_path, final_filename)
+                    if not is_path_valid(full_photo_path):
+                        log_signal.emit(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
+                        logger.error(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
+                        progress_signal.emit(1)
+                        return
+
+                if os.path.exists(full_photo_path):
+                    log_signal.emit(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
+                    logger.info(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
+                    progress_signal.emit(1)
+                    return
 
             with open(full_photo_path, "wb") as f:
                 f.write(response.content)
