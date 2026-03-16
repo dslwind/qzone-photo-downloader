@@ -688,7 +688,7 @@ class QzonePhotoManager:
             driver_path = local_path
         # 2. 从系统PATH查找
         else:
-            driver_path = driver_name if shutil.which(driver_name) else None
+            driver_path = shutil.which(driver_name)
 
         print("正在尝试启动 Chrome 进行登录...")
         options = webdriver.ChromeOptions()
