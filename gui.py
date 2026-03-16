@@ -1,5 +1,6 @@
 import errno
 import json
+import json_repair
 import logging
 import os
 import random
@@ -8,8 +9,10 @@ import sys
 import traceback
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from logging.handlers import RotatingFileHandler
 
+import piexif
 import requests
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
@@ -88,7 +91,239 @@ USER_CONFIG = {
 }
 
 QzoneAlbum = namedtuple("QzoneAlbum", ["uid", "name", "count"])
-QzonePhoto = namedtuple("QzonePhoto", ["url", "name", "album_name", "is_video", "pic_key"])
+QzonePhoto = namedtuple("QzonePhoto", [
+    "url", "name", "album_name", "is_video", "pic_key",
+    "exif_data",    # dict，来自 photo_data["exif"]
+    "shoottime",    # str，来自 rawshoottime，含时分秒
+    "uploadtime",   # str，来自 uploadtime，含时分秒
+    "cameratype",   # str，完整设备名，如 "Apple iPhone 15 Pro Max"
+])
+
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+def _str_to_rational(value_str: str) -> tuple | None:
+    """将字符串转为 EXIF rational 元组 (分子, 分母)。"""
+    if not value_str or not value_str.strip():
+        return None
+    try:
+        s = value_str.strip()
+        if "/" in s:
+            num, den = s.split("/", 1)
+            num, den = int(num), int(den)
+            return None if num < 0 or den <= 0 else (num, den)  # ← 过滤负值和零分母
+        frac = Fraction(float(s)).limit_denominator(1_000_000)
+        return None if frac < 0 else (frac.numerator, frac.denominator)  # ← 过滤负值
+    except Exception:
+        return None
+
+
+def _str_to_srational(value_str: str) -> tuple | None:
+    """将字符串转为 EXIF signed rational 元组。"""
+    r = _str_to_rational(value_str)
+    if r is None:
+        return None
+    return (int(r[0]), int(r[1]))
+
+
+def _str_to_short(value_str: str) -> int | None:
+    """将字符串转为 EXIF SHORT 整数。"""
+    if not value_str or not value_str.strip():
+        return None
+    try:
+        v = int(float(value_str.strip()))
+        return None if v < 0 else v  # ← 过滤负值
+    except Exception:
+        return None
+
+
+def _ascii_bytes(s: str) -> bytes:
+    """编码为 ASCII bytes，非 ASCII 字符用 ? 替换。"""
+    return s.encode("ascii", errors="replace")
+
+
+def _datetime_str_to_exif(dt_str: str) -> str | None:
+    """
+    将 API 返回的时间字符串转换为 EXIF 标准格式 "YYYY:MM:DD HH:MM:SS"。
+    支持：
+      - "2024-11-24 17:42:10"（rawshoottime、uploadtime 格式）
+      - "2024:11:24 17:42:10"（exif.originalTime 格式，已是标准格式）
+    """
+    if not dt_str or not str(dt_str).strip() or str(dt_str).strip() == "0":
+        return None
+    s = str(dt_str).strip()
+    # 已是 EXIF 格式
+    if re.match(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$", s):
+        return s
+    # "YYYY-MM-DD HH:MM:SS" 格式
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$", s)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} {m.group(4)}"
+    # 仅日期 "YYYY-MM-DD"
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} 00:00:00"
+    return None
+
+
+def write_exif_to_photo(
+    file_path: str,
+    exif_data: dict,
+    shoottime: str,
+    uploadtime: str,
+    cameratype: str = "",
+) -> None:
+    """
+    将 API 返回的元数据回写至 JPEG 文件的 EXIF。
+    仅对 .jpeg/.jpg 文件有效，出错时静默跳过。
+
+    写入字段一览：
+      Make                 ← exif.make，或从 cameratype 首个品牌词提取
+      Model                ← exif.model 或 cameratype
+      DateTimeOriginal     ← exif.originalTime（优先）或 rawshoottime、uploadtime
+      ExposureTime         ← exif.exposureTime
+      FNumber              ← exif.fnumber
+      ISOSpeedRatings      ← exif.iso
+      FocalLength          ← exif.focalLength
+      Flash                ← exif.flash
+      ExposureMode         ← exif.exposureMode
+      ExposureProgram      ← exif.exposureProgram
+      MeteringMode         ← exif.meteringMode
+      ExposureBiasValue    ← exif.exposureCompensation
+      LensModel            ← exif.lensModel
+    """
+    if file_path.lower().endswith((".jpg", ".jpeg")):
+        try:
+            try:
+                exif_dict = piexif.load(file_path)
+            except Exception:
+                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+
+            zeroth = exif_dict.setdefault("0th", {})
+            exif   = exif_dict.setdefault("Exif", {})
+
+            # --- 相机厂商 / 完整型号 ---
+            make       = (exif_data.get("make")  or "").strip()
+            exif_model = (exif_data.get("model") or "").strip()
+            cameratype = (cameratype or "").strip()
+
+            # 若 exif.make 为空，尝试从 cameratype 首个已知品牌前缀提取
+            extracted_brand = ""
+            if not make and cameratype:
+                known_makes = [
+                    "Apple", "Samsung", "SONY", "HUAWEI", "Xiaomi", "ASUS",
+                    "Google", "OnePlus", "OPPO", "vivo", "Canon", "Nikon",
+                    "Fujifilm", "Panasonic", "Leica", "DJI", "GoPro",
+                ]
+                for brand in known_makes:
+                    if cameratype.startswith(brand):
+                        extracted_brand = brand
+                        make = brand
+                        break
+
+            # Model：优先 exif.model，退回 cameratype
+            # 若从 cameratype 提取了品牌，Model 只写品牌之后的部分，避免与 Make 重复
+            if exif_model:
+                zeroth[piexif.ImageIFD.Model] = _ascii_bytes(exif_model)
+            elif cameratype:
+                model_str = cameratype[len(extracted_brand):].strip() if extracted_brand else cameratype
+                if model_str:
+                    zeroth[piexif.ImageIFD.Model] = _ascii_bytes(model_str)
+
+            if make:
+                zeroth[piexif.ImageIFD.Make] = _ascii_bytes(make)
+
+
+            # --- 拍摄时间 → DateTimeOriginal ---
+            # 优先使用 exif.originalTime（来自相机固件，最准确）
+            original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
+            if original_time:
+                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
+            elif shoottime:
+                # 退回到 rawshoottime
+                shoot_exif = _datetime_str_to_exif(shoottime)
+                if shoot_exif:
+                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+            else:
+                shoot_exif = _datetime_str_to_exif(uploadtime)
+                if shoot_exif:
+                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
+
+            # --- 曝光时间 ---
+            r = _str_to_rational(exif_data.get("exposureTime", ""))
+            if r:
+                exif[piexif.ExifIFD.ExposureTime] = r
+
+            # --- 光圈值 ---
+            r = _str_to_rational(exif_data.get("fnumber", ""))
+            if r:
+                exif[piexif.ExifIFD.FNumber] = r
+
+            # --- ISO ---
+            iso = _str_to_short(exif_data.get("iso", ""))
+            if iso is not None:
+                exif[piexif.ExifIFD.ISOSpeedRatings] = iso
+
+            # --- 焦距 ---
+            r = _str_to_rational(exif_data.get("focalLength", ""))
+            if r:
+                exif[piexif.ExifIFD.FocalLength] = r
+
+            # --- 闪光灯 ---
+            flash = _str_to_short(exif_data.get("flash", ""))
+            if flash is not None:
+                exif[piexif.ExifIFD.Flash] = flash
+
+            # --- 曝光模式 ---
+            em = _str_to_short(exif_data.get("exposureMode", ""))
+            if em is not None:
+                exif[piexif.ExifIFD.ExposureMode] = em
+
+            # --- 曝光程序 ---
+            ep = _str_to_short(exif_data.get("exposureProgram", ""))
+            if ep is not None:
+                exif[piexif.ExifIFD.ExposureProgram] = ep
+
+            # --- 测光模式 ---
+            mm = _str_to_short(exif_data.get("meteringMode", ""))
+            if mm is not None:
+                exif[piexif.ExifIFD.MeteringMode] = mm
+
+            # --- 曝光补偿 ---
+            sr = _str_to_srational(exif_data.get("exposureCompensation", ""))
+            if sr is not None:
+                exif[piexif.ExifIFD.ExposureBiasValue] = sr
+
+            # --- 镜头型号 ---
+            lens = (exif_data.get("lensModel") or "").strip()
+            if lens:
+                exif[piexif.ExifIFD.LensModel] = _ascii_bytes(lens)
+
+            exif_bytes = piexif.dump(exif_dict)
+            piexif.insert(exif_bytes, file_path)
+
+        except Exception as e:
+            logger.warning(f"[EXIF] 回写失败，文件 {file_path}: {e}")
+
+    dt_str = (
+        _datetime_str_to_exif(exif_data.get("originalTime", ""))
+        or _datetime_str_to_exif(shoottime)
+        or _datetime_str_to_exif(uploadtime)
+    )
+    if dt_str:
+        try:
+            import time
+            t = time.mktime(time.strptime(dt_str, "%Y:%m:%d %H:%M:%S"))
+            os.utime(file_path, (t, t))
+        except Exception as e:
+            print(f"[mtime] 写入文件修改日期失败，文件 {file_path}: {e}")
+
+    if not file_path.lower().endswith((".jpg", ".jpeg")):
+        return
+
+
 
 
 def get_script_directory() -> str:
@@ -146,6 +381,18 @@ def sanitize_filename_component(name_component: str) -> str:
     illegal_chars = r'[\/\\:*?"<>|\0]'
     return re.sub(illegal_chars, "_", name_component)
 
+def _detect_image_extension(content: bytes) -> str:
+    """通过文件头魔术字节判断图片格式，返回对应扩展名。"""
+    if content[:3] == b'\xff\xd8\xff':
+        return ".jpeg"
+    if content[:4] == b'\x89PNG':
+        return ".png"
+    if content[:6] in (b'GIF87a', b'GIF89a'):
+        return ".gif"
+    if content[:4] == b'RIFF' and content[8:12] == b'WEBP':
+        return ".webp"
+    # 兜底仍用 jpeg
+    return ".jpeg"
 
 def get_save_directory(user_qq: str) -> str:
     """确定给定用户的照片保存目录。"""
@@ -209,34 +456,20 @@ def save_photo_worker(args: tuple) -> None:
         if video_url:
             download_url = video_url
             file_extension = ".mp4"
-            log_signal.emit(f"[成功] 获取到视频下载链接")
-            logger.info(f"[成功] 获取到视频下载链接")
+            final_filename = f"{base_filename}{file_extension}"
+            full_photo_path = os.path.join(album_save_path, final_filename)
+            log_signal.emit(f"[成功] 获取到视频{base_filename}下载链接")
+            logger.info(f"[成功] 获取到视频{base_filename}下载链接")
         else:
-            log_signal.emit(f"[失败] 无法获取视频下载链接，将下载视频封面图代替")
-            logger.warning(f"[失败] 无法获取视频下载链接，将下载视频封面图代替: {photo.name}")
+            log_signal.emit(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替")
+            logger.warning(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替: {photo.name}")
             base_filename = f"{photo_index}_{photo_name_sanitized}_视频封面"
-
-    final_filename = f"{base_filename}{file_extension}"
-    full_photo_path = os.path.join(album_save_path, final_filename)
-
-    if not is_path_valid(full_photo_path):
-        log_signal.emit(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-        logger.warning(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-        final_filename = f"random_name_{album_index}_{photo_index}.jpeg"
-        full_photo_path = os.path.join(album_save_path, final_filename)
-        if not is_path_valid(full_photo_path):
-            log_signal.emit(f"[错误] 备用文件名也无效: {final_filename}。跳过照片: {photo.url}")
-            logger.error(f"[错误] 备用文件名也无效: {final_filename}。跳过照片: {photo.url}")
-            progress_signal.emit(1)
-            return
-
-    if os.path.exists(full_photo_path):
-        log_signal.emit(
-            f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')"
-        )
-        logger.info(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
-        progress_signal.emit(1)
-        return
+            final_filename = ""
+            full_photo_path = ""
+    else:
+        # 照片：先下载，检测扩展名后再做路径检查
+        final_filename = ""
+        full_photo_path = ""
 
     url = download_url.replace("\\", "")
     attempts = 0
@@ -257,8 +490,41 @@ def save_photo_worker(args: tuple) -> None:
             response = download_photo_network_helper(session, url, current_timeout)
             response.raise_for_status()
 
+            if not (photo.is_video and file_extension == ".mp4"):
+                # 此时才能确定扩展名和最终路径
+                file_extension = _detect_image_extension(response.content)
+                final_filename = f"{base_filename}{file_extension}"
+                full_photo_path = os.path.join(album_save_path, final_filename)
+
+                if not is_path_valid(full_photo_path):
+                    log_signal.emit(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
+                    logger.warning(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
+                    final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
+                    full_photo_path = os.path.join(album_save_path, final_filename)
+                    if not is_path_valid(full_photo_path):
+                        log_signal.emit(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
+                        logger.error(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
+                        progress_signal.emit(1)
+                        return
+
+                if os.path.exists(full_photo_path):
+                    log_signal.emit(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
+                    logger.info(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
+                    progress_signal.emit(1)
+                    return
+
             with open(full_photo_path, "wb") as f:
                 f.write(response.content)
+
+            # EXIF 回写（仅对 .jpeg/.jpg 有效，视频 .mp4 会被内部静默跳过）
+            write_exif_to_photo(
+                full_photo_path,
+                photo.exif_data,
+                photo.shoottime,
+                photo.uploadtime,
+                photo.cameratype,
+            )
+
             log_signal.emit(
                 f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s"
             )
@@ -588,6 +854,14 @@ class QzonePhotoManager:
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
+            logger.warning(f"JSON 解码失败，尝试修复: {e}")
+            try:
+                repaired = json_repair.repair_json(json_str, return_objects=True)
+                if repaired:
+                    logger.warning(f"JSON 修复成功")
+                    return repaired
+            except Exception as repair_err:
+                logger.error(f"JSON 修复也失败: {repair_err}")
             self._emit_log(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
             logger.error(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
             if APP_CONFIG["is_api_debug"]:
@@ -857,6 +1131,7 @@ class QzonePhotoManager:
                     return photos
                 pic_url = (
                     photo_data.get("raw")
+                    or photo_data.get("origin_url")
                     or photo_data.get("url")
                     or photo_data.get("custom_url")
                 )
@@ -890,6 +1165,10 @@ class QzonePhotoManager:
                             or photo_data.get("phototype") == "video"
                         ),
                         pic_key=pic_key,
+                        exif_data=photo_data.get("exif", {}),
+                        shoottime=photo_data.get("rawshoottime", ""),
+                        uploadtime=photo_data.get("uploadtime", ""),
+                        cameratype=photo_data.get("cameratype", "").strip(),
                     )
                 )
 
