@@ -124,10 +124,18 @@ def _str_to_rational(value_str: str) -> tuple | None:
 
 def _str_to_srational(value_str: str) -> tuple | None:
     """将字符串转为 EXIF signed rational 元组。"""
-    r = _str_to_rational(value_str)
-    if r is None:
+    if not value_str or not value_str.strip():
         return None
-    return (int(r[0]), int(r[1]))
+    try:
+        s = value_str.strip()
+        if "/" in s:
+            num, den = s.split("/", 1)
+            num, den = int(num), int(den)
+            return None if den <= 0 else (num, den)
+        frac = Fraction(float(s)).limit_denominator(1_000_000)
+        return (frac.numerator, frac.denominator)
+    except Exception:
+        return None
 
 
 def _str_to_short(value_str: str) -> int | None:
@@ -534,6 +542,19 @@ def save_photo_worker(args: tuple) -> None:
             file_extension = ".mp4"
             final_filename = f"{base_filename}{file_extension}"
             full_photo_path = os.path.join(album_save_path, final_filename)
+
+            if not is_path_valid(full_photo_path):
+                print(f"[警告] 原始视频文件名无效: {final_filename}。将使用随机名称。")
+                final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
+                full_photo_path = os.path.join(album_save_path, final_filename)
+                if not is_path_valid(full_photo_path):
+                    print(f"[错误] 备用视频文件名也无效，跳过视频: {photo.url}")
+                    return
+
+            if os.path.exists(full_photo_path):
+                print(f"[本地已存在] 相册 '{album_name}', 视频 {photo_index + 1} ('{photo.name}')")
+                return
+
             print(f"[成功] 获取到视频{base_filename}下载链接")
         else:
             print(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替")

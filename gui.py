@@ -124,10 +124,18 @@ def _str_to_rational(value_str: str) -> tuple | None:
 
 def _str_to_srational(value_str: str) -> tuple | None:
     """将字符串转为 EXIF signed rational 元组。"""
-    r = _str_to_rational(value_str)
-    if r is None:
+    if not value_str or not value_str.strip():
         return None
-    return (int(r[0]), int(r[1]))
+    try:
+        s = value_str.strip()
+        if "/" in s:
+            num, den = s.split("/", 1)
+            num, den = int(num), int(den)
+            return None if den <= 0 else (num, den)
+        frac = Fraction(float(s)).limit_denominator(1_000_000)
+        return (frac.numerator, frac.denominator)
+    except Exception:
+        return None
 
 
 def _str_to_short(value_str: str) -> int | None:
@@ -460,6 +468,24 @@ def save_photo_worker(args: tuple) -> None:
             file_extension = ".mp4"
             final_filename = f"{base_filename}{file_extension}"
             full_photo_path = os.path.join(album_save_path, final_filename)
+
+            if not is_path_valid(full_photo_path):
+                log_signal.emit(f"[警告] 原始视频文件名无效: {final_filename}。将使用随机名称。")
+                logger.warning(f"[警告] 原始视频文件名无效: {final_filename}。将使用随机名称。")
+                final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
+                full_photo_path = os.path.join(album_save_path, final_filename)
+                if not is_path_valid(full_photo_path):
+                    log_signal.emit(f"[错误] 备用视频文件名也无效，跳过视频: {photo.url}")
+                    logger.error(f"[错误] 备用视频文件名也无效，跳过视频: {photo.url}")
+                    progress_signal.emit(1)
+                    return
+
+            if os.path.exists(full_photo_path):
+                log_signal.emit(f"[本地已存在] 相册 '{album_name}', 视频 {photo_index + 1} ('{photo.name}')")
+                logger.info(f"[本地已存在] 相册 '{album_name}', 视频 {photo_index + 1} ('{photo.name}')")
+                progress_signal.emit(1)
+                return
+
             log_signal.emit(f"[成功] 获取到视频{base_filename}下载链接")
             logger.info(f"[成功] 获取到视频{base_filename}下载链接")
         else:
@@ -1349,34 +1375,35 @@ class DownloadWorker(QThread):
     def run(self):
         """线程的主要执行方法。"""
         final_status = "All"
+        had_error = False
         try:
             self.log_signal.emit("正在初始化下载管理器并尝试登录...")
-            
+
             # 检查是否可以复用之前的cookie
             reuse_cookie = False
-            if (self.previous_qzone_manager and 
+            if (self.previous_qzone_manager and
                 self.previous_qzone_manager.user_qq == self.main_user_qq and
                 self.previous_qzone_manager.cookies):
-                
+
                 self.log_signal.emit("检测到已存在的登录信息，正在验证cookie有效性...")
                 if self.previous_qzone_manager._check_cookie_validity():
                     # 复用之前的QzonePhotoManager
                     self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
                     self.qzone_manager._set_cookies_and_gtk(
-                        self.previous_qzone_manager.cookies, 
+                        self.previous_qzone_manager.cookies,
                         str(self.previous_qzone_manager.qzone_g_tk)  # 确保g_tk是字符串类型
                     )
                     reuse_cookie = True
                     self.log_signal.emit("之前的cookie仍然有效，直接使用。")
                 else:
                     self.log_signal.emit("之前的cookie已失效，需要重新登录。")
-            
+
             # 如果不能复用cookie，则创建新的QzonePhotoManager并登录
             if not reuse_cookie:
                 self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
                 if not self.is_stopped():
                     self.qzone_manager._login_and_get_cookies()
-            
+
             if not self.is_stopped() and self.qzone_manager:
                 self.log_signal.emit("登录过程已完成。")
             else:
@@ -1397,6 +1424,7 @@ class DownloadWorker(QThread):
                     if self.qzone_manager:  # 确保qzone_manager不为None
                         self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
                 except Exception as e:
+                    had_error = True
                     self.log_signal.emit(f"处理用户 {target_qq_str} 时发生意外错误: {e}")
                     self.log_signal.emit(traceback.format_exc())
                     logger.exception(f"处理用户 {target_qq_str} 时发生意外错误。")
@@ -1404,14 +1432,20 @@ class DownloadWorker(QThread):
                 self.finished_signal.emit(target_qq_str)
 
             if not self.is_stopped():
-                self.log_signal.emit("\n所有指定用户处理完毕。")
-                logger.info("所有指定用户处理完毕。")
+                if had_error:
+                    self.log_signal.emit("\n下载任务结束，但过程中出现错误，请查看日志。")
+                    logger.warning("下载任务结束，但过程中出现错误。")
+                    final_status = "Error"
+                else:
+                    self.log_signal.emit("\n所有指定用户处理完毕。")
+                    logger.info("所有指定用户处理完毕。")
             else:
                 self.log_signal.emit("下载已停止。")
                 logger.info("下载已停止。")
                 final_status = "Stopped"
 
         except Exception as e:
+            final_status = "Error"
             self.log_signal.emit(f"下载过程中发生关键错误: {e}")
             self.log_signal.emit(traceback.format_exc())
             logger.exception("下载过程中发生关键错误。")
@@ -1437,11 +1471,6 @@ class QzoneDownloaderGUI(QWidget):
 
         self.init_ui()
         self.load_initial_config_to_ui()
-
-        self.gui_logger_handler = GuiLogHandler(self.log_output)
-        self.gui_logger_handler.setLevel(logging.INFO)
-        self.gui_logger_handler.setFormatter(formatter)
-        logger.addHandler(self.gui_logger_handler)
 
     def init_ui(self):
         """初始化用户界面。"""
@@ -1656,6 +1685,12 @@ class QzoneDownloaderGUI(QWidget):
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setFormat("已停止")
+        elif user_qq_or_all == "Error":
+            self.log_output.append("下载过程中出现错误，请查看日志。")
+            logger.warning("下载过程中出现错误，请查看日志。")
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.progress_bar.setFormat("出错")
         else:
             self.log_output.append(f"用户 {user_qq_or_all} 的照片下载完成。")
             logger.info(f"用户 {user_qq_or_all} 的照片下载完成。")
