@@ -5,8 +5,9 @@
 ## ✨ 功能特性
 
 - 双模式运行：GUI 界面和命令行两种使用方式
-- 配置分离：通过`config.json`管理 QQ 账号和下载配置
-- 自动更新：集成`webdriver_manager`自动管理浏览器驱动
+- 配置分离：通过 `config.json` 管理 QQ 账号和下载配置
+- 驱动自动管理：命令行和 GUI 都会优先复用本地/系统 ChromeDriver，不存在时再使用 `webdriver_manager` 自动下载
+- 手动登录：启动浏览器后手动完成 QQ 空间登录，更适配验证码/风控场景
 - 断点续传：支持跳过已下载照片
 - 多账号支持：可同时下载多个好友的相册
 - 多线程：支持多线程下载提高效率
@@ -50,11 +51,19 @@ pip install -r requirements-gui.txt  # GUI版本额外依赖
 ```json
 {
   "main_user_qq": "你的QQ号",
-  "dest_users_qq": ["目标QQ号1", "目标QQ号2"]
+  "main_user_pass": "",
+  "dest_users_qq": ["目标QQ号1", "目标QQ号2"],
+  "max_workers": 10,
+  "timeout_init": 30,
+  "max_attempts": 3,
+  "is_api_debug": true,
+  "exclude_albums": [],
+  "download_path": "qzone_photo"
 }
 ```
 
-将`main_user_qq`修改为您的 QQ 号码，`dest_users_qq`修改为好友的 QQ 号码。
+将 `main_user_qq` 修改为您的 QQ 号码，`dest_users_qq` 修改为好友的 QQ 号码。
+`main_user_pass` 目前仅为兼容旧配置保留，默认仍建议手动登录。
 
 > 注意: 多个 QQ 号之间用逗号分隔，最后一个 QQ 号后不要加逗号，例如：`["123", "456"]`
 
@@ -93,10 +102,12 @@ qzone-photo-downloader/
 
 可在 `config.json` 中调整以下参数:
 
-- `max_workers`: 并发下载线程数 (默认: 5)
+- `max_workers`: 并发下载线程数 (默认: 10)
 - `timeout_init`: 初始化超时时间(秒) (默认: 30)
-- `is_api_debug`: 是否开启 API 调试 (默认: false)
+- `max_attempts`: 下载失败后的最大重试次数 (默认: 3)
+- `is_api_debug`: 是否开启 API 调试 (默认: true)
 - `exclude_albums`: 要排除的相册名称列表
+- `download_path`: 下载目录，默认为脚本目录下的 `qzone_photo`
 
 ## ❓ 常见问题
 

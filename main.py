@@ -36,6 +36,7 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 配置信息 ---
 CONFIG_FILE = "config.json"
@@ -78,7 +79,7 @@ APP_CONFIG = {
     "timeout_init": CONFIG.get("timeout_init", 30),     # 请求初始超时时间 (秒)
     "max_attempts": CONFIG.get("max_attempts", 3),      # 下载失败后最大重试次数
     "is_api_debug": CONFIG.get("is_api_debug", True),   # 是否打印 API 请求 URL 和响应内容
-    "exclude_albums": CONFIG.get("exclude_albums", []), # 需要排除、不下载的相册名称列表
+    "exclude_albums": [name for name in CONFIG.get("exclude_albums", []) if str(name).strip()], # 需要排除、不下载的相册名称列表
     "download_path": CONFIG.get("download_path", "qzone_photo"),    # 下载路径（相对于脚本位置）
 }
 
@@ -659,12 +660,12 @@ class QzonePhotoManager:
         "&need_private_comment=1&prevNum=9&postNum=18"
     )
 
-    def __init__(self, user_qq: str, password: str):
+    def __init__(self, user_qq: str, password: str = ""):
         """初始化QzonePhotoManager对象。
-        
+
         Args:
             user_qq (str): 用户的QQ号
-            password (str): 用户的QQ密码
+            password (str, optional): 兼容旧配置保留，当前版本默认仍使用手动登录。
         """
         self.user_qq = str(user_qq)
         self.password = password
@@ -674,40 +675,26 @@ class QzonePhotoManager:
         self.total_albums = 0
         self._login_and_get_cookies()
 
-    def _login_and_get_cookies(self):
-        """使用 Selenium 登录 QQ 空间以获取必要的 cookie。
-        
-        通过Selenium启动Chrome浏览器，用户需要在浏览器中手动登录QQ空间。
-        登录成功后，会自动获取并保存必要的cookie信息。
+    def _resolve_chromedriver_path(self) -> str:
+        """解析可用的 ChromeDriver 路径。
+
+        优先级：脚本目录 > 系统 PATH > webdriver_manager 自动下载。
         """
         driver_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
-
-        # 1. 优先从脚本目录查找
         local_path = os.path.join(get_script_directory(), driver_name)
         if os.path.exists(local_path):
-            driver_path = local_path
-        # 2. 从系统PATH查找
-        else:
-            driver_path = driver_name if shutil.which(driver_name) else None
+            return local_path
 
-        print("正在尝试启动 Chrome 进行登录...")
-        options = webdriver.ChromeOptions()
-        # 如果需要，添加任何选项，例如：无头模式、用户代理
-        # options.add_argument('--headless')
-        # options.add_argument('--disable-gpu')
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-blink-features")
+        system_driver = shutil.which(driver_name)
+        if system_driver:
+            return system_driver
 
-        # options.add_argument("--disable-extensions")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--lang=zh-CN")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        # 使用 Service 对象指定 ChromeDriver路径
-        service = ChromeService(executable_path=driver_path)
+        print("未在脚本目录或系统 PATH 中找到 ChromeDriver，尝试自动下载匹配版本...")
+        return ChromeDriverManager().install()
+
+    def _apply_anti_detection_patches(self, driver: webdriver.Chrome) -> None:
+        """尽力应用浏览器伪装设置；失败时仅告警，不中断启动。"""
         try:
-            driver = webdriver.Chrome(service=service, options=options)
             driver.execute_cdp_cmd(
                 "Network.setUserAgentOverride",
                 {
@@ -716,9 +703,10 @@ class QzonePhotoManager:
                     ).replace("Headless", "")
                 },
             )
-            driver.execute_cdp_cmd(
-                "Page.removeScriptToEvaluateOnNewDocument", {"identifier": "1"}
-            )
+        except Exception as e:
+            print(f"[警告] 设置 User-Agent 覆盖失败，继续执行: {e}")
+
+        try:
             driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
                 {
@@ -730,7 +718,34 @@ class QzonePhotoManager:
                 },
             )
         except Exception as e:
-            print(f"启动 ChromeDriver 失败。请确保它在您的 PATH 或脚本目录中: {e}")
+            print(f"[警告] 注入 webdriver 伪装脚本失败，继续执行: {e}")
+
+    def _login_and_get_cookies(self):
+        """使用 Selenium 登录 QQ 空间以获取必要的 cookie。
+
+        通过Selenium启动Chrome浏览器，用户需要在浏览器中手动登录QQ空间。
+        登录成功后，会自动获取并保存必要的cookie信息。
+        """
+        print("正在尝试启动 Chrome 进行登录...")
+        options = webdriver.ChromeOptions()
+        # 如果需要，添加任何选项，例如：无头模式、用户代理
+        # options.add_argument('--headless')
+        # options.add_argument('--disable-gpu')
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--lang=zh-CN")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        driver_path = None
+        try:
+            driver_path = self._resolve_chromedriver_path()
+            service = ChromeService(executable_path=driver_path)
+            driver = webdriver.Chrome(service=service, options=options)
+            self._apply_anti_detection_patches(driver)
+        except Exception as e:
+            print(f"启动 ChromeDriver 失败: {e}")
             print(f"尝试使用的驱动路径: {driver_path}")
             print(
                 "您可以从以下地址下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing"
@@ -957,15 +972,16 @@ class QzonePhotoManager:
 
     def get_albums_by_page(self, dest_user_qq: str) -> list[QzoneAlbum]:
         """分页获取相册列表。
-        
+
         通过分页方式获取目标用户的所有相册信息，解决单次请求限制问题。
-        
+
         Args:
             dest_user_qq (str): 目标用户的QQ号
-            
+
         Returns:
             list[QzoneAlbum]: 目标用户的所有相册列表
         """
+        self.total_albums = 0
         pageStart = 0
         allAlbums = []
         while self.total_albums == 0 or pageStart < self.total_albums:

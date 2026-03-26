@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
 import traceback
 from collections import namedtuple
@@ -81,12 +82,13 @@ APP_CONFIG = {
     "timeout_init": CONFIG.get("timeout_init", 30),
     "max_attempts": CONFIG.get("max_attempts", 3),
     "is_api_debug": CONFIG.get("is_api_debug", True),
-    "exclude_albums": CONFIG.get("exclude_albums", []),
+    "exclude_albums": [name for name in CONFIG.get("exclude_albums", []) if str(name).strip()],
     "download_path": CONFIG.get("download_path", "qzone_photo"),
 }
 
 USER_CONFIG = {
     "main_user_qq": CONFIG.get("main_user_qq", "123456"),
+    "main_user_pass": CONFIG.get("main_user_pass", ""),
     "dest_users_qq": CONFIG.get("dest_users_qq", ["123456",]),
 }
 
@@ -700,25 +702,26 @@ class QzonePhotoManager:
             
         self._emit_log("已设置cookie和g_tk。")
 
-    def _login_and_get_cookies(self):
+    def _resolve_chromedriver_path(self) -> str:
+        """解析可用的 ChromeDriver 路径。
+
+        优先级：脚本目录 > 系统 PATH > webdriver_manager 自动下载。
         """
-        使用 Selenium 登录 QQ 空间以获取必要的 cookie。
-        自动下载和设置 ChromeDriver。
-        """
-        self._emit_log("尝试启动 Chrome 进行登录...")
-        options = webdriver.ChromeOptions()
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-blink-features")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--lang=zh-CN")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        
+        driver_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+        local_path = os.path.join(get_script_directory(), driver_name)
+        if os.path.exists(local_path):
+            return local_path
+
+        system_driver = shutil.which(driver_name)
+        if system_driver:
+            return system_driver
+
+        self._emit_log("未在脚本目录或系统 PATH 中找到 ChromeDriver，尝试自动下载匹配版本...")
+        return ChromeDriverManager().install()
+
+    def _apply_anti_detection_patches(self, driver: webdriver.Chrome) -> None:
+        """尽力应用浏览器伪装设置；失败时仅记录告警。"""
         try:
-            driver_path = ChromeDriverManager().install()
-            service = ChromeService(executable_path=driver_path)
-            driver = webdriver.Chrome(service=service, options=options)
             driver.execute_cdp_cmd(
                 "Network.setUserAgentOverride",
                 {
@@ -727,9 +730,11 @@ class QzonePhotoManager:
                     ).replace("Headless", "")
                 },
             )
-            driver.execute_cdp_cmd(
-                "Page.removeScriptToEvaluateOnNewDocument", {"identifier": "1"}
-            )
+        except Exception as e:
+            self._emit_log(f"[警告] 设置 User-Agent 覆盖失败，继续执行: {e}")
+            logger.warning(f"设置 User-Agent 覆盖失败: {e}")
+
+        try:
             driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
                 {
@@ -741,7 +746,32 @@ class QzonePhotoManager:
                 },
             )
         except Exception as e:
-            self._emit_log(f"启动 ChromeDriver 失败。请确保您的 Chrome 浏览器是最新的，或者手动下载并将其放入PATH。错误: {e}")
+            self._emit_log(f"[警告] 注入 webdriver 伪装脚本失败，继续执行: {e}")
+            logger.warning(f"注入 webdriver 伪装脚本失败: {e}")
+
+    def _login_and_get_cookies(self):
+        """
+        使用 Selenium 登录 QQ 空间以获取必要的 cookie。
+        自动下载和设置 ChromeDriver。
+        """
+        self._emit_log("尝试启动 Chrome 进行登录...")
+        options = webdriver.ChromeOptions()
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--lang=zh-CN")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        driver_path = None
+        try:
+            driver_path = self._resolve_chromedriver_path()
+            service = ChromeService(executable_path=driver_path)
+            driver = webdriver.Chrome(service=service, options=options)
+            self._apply_anti_detection_patches(driver)
+        except Exception as e:
+            self._emit_log(f"启动 ChromeDriver 失败。错误: {e}")
+            self._emit_log(f"尝试使用的驱动路径: {driver_path}")
             self._emit_log(
                 "如果问题仍然存在，您可以从以下地址手动下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing"
             )
@@ -963,6 +993,7 @@ class QzonePhotoManager:
             return ""
 
     def get_albums_by_page(self, dest_user_qq: str) -> list[QzoneAlbum]:
+        self.total_albums = 0
         pageStart = 0
         allAlbums = []
         while self.total_albums == 0 or pageStart < self.total_albums:
@@ -1317,6 +1348,7 @@ class DownloadWorker(QThread):
 
     def run(self):
         """线程的主要执行方法。"""
+        final_status = "All"
         try:
             self.log_signal.emit("正在初始化下载管理器并尝试登录...")
             
@@ -1350,7 +1382,7 @@ class DownloadWorker(QThread):
             else:
                 self.log_signal.emit("启动前已收到停止请求，跳过登录。")
                 logger.info("启动前已收到停止请求，跳过登录。")
-                self.finished_signal.emit("Stopped")
+                final_status = "Stopped"
                 return
 
             for target_qq in self.dest_users_qq:
@@ -1377,6 +1409,7 @@ class DownloadWorker(QThread):
             else:
                 self.log_signal.emit("下载已停止。")
                 logger.info("下载已停止。")
+                final_status = "Stopped"
 
         except Exception as e:
             self.log_signal.emit(f"下载过程中发生关键错误: {e}")
@@ -1386,7 +1419,7 @@ class DownloadWorker(QThread):
             # 保存当前的QzonePhotoManager实例，供下次使用
             if self.qzone_manager:
                 self.previous_qzone_manager = self.qzone_manager
-            self.finished_signal.emit("All")
+            self.finished_signal.emit(final_status)
 
 
 class QzoneDownloaderGUI(QWidget):
@@ -1493,7 +1526,7 @@ class QzoneDownloaderGUI(QWidget):
     def start_download(self):
         """在单独的线程中启动下载过程。"""
         main_qq = self.main_qq_input.text().strip()
-        main_pass = ""
+        main_pass = USER_CONFIG.get("main_user_pass", "")
         dest_qqs_str = self.dest_qq_input.text().strip()
         download_path = self.download_path_input.text().strip()
 
@@ -1523,12 +1556,14 @@ class QzoneDownloaderGUI(QWidget):
             return
 
         USER_CONFIG["main_user_qq"] = main_qq
+        USER_CONFIG["main_user_pass"] = main_pass
         USER_CONFIG["dest_users_qq"] = dest_qqs
         APP_CONFIG["download_path"] = os.path.relpath(download_path, get_script_directory())
 
         try:
             updated_config = {
                 "main_user_qq": USER_CONFIG["main_user_qq"],
+                "main_user_pass": USER_CONFIG["main_user_pass"],
                 "dest_users_qq": USER_CONFIG["dest_users_qq"],
                 "max_workers": APP_CONFIG["max_workers"],
                 "timeout_init": APP_CONFIG["timeout_init"],
