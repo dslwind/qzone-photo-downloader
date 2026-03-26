@@ -469,29 +469,35 @@ def get_save_directory(user_qq: str) -> str:
 
 
 def download_photo_network_helper(
-    session: requests.Session, url: str, timeout: int
+    request_cookies: dict | None, url: str, timeout: int
 ) -> requests.Response:
     """
-    下载照片的辅助函数，如果需要，首先尝试使用会话下载，然后不使用会话下载。
-    
+    下载照片的辅助函数：优先携带 cookies 请求，失败时再回退到无 cookies 请求。
+
     Args:
-        session (requests.Session): requests会话对象，用于保持连接
+        request_cookies (dict | None): 请求所需 cookies
         url (str): 照片的下载URL
         timeout (int): 下载超时时间（秒）
-        
+
     Returns:
         requests.Response: HTTP响应对象
-        
+
     Raises:
-        requests.exceptions.RequestException: 当网络请求失败时
+        requests.exceptions.RequestException: 当所有网络请求都失败时
     """
     try:
-        if session:
-            return session.get(url, timeout=timeout)
-        else:
-            return requests.get(url, timeout=timeout)
-    except requests.exceptions.RequestException as e:
-        print(f"[网络错误] 尝试下载 {url} 时出错: {e}")
+        if request_cookies:
+            return requests.get(url, cookies=request_cookies, timeout=timeout)
+        return requests.get(url, timeout=timeout)
+    except requests.exceptions.RequestException as first_error:
+        if request_cookies:
+            print(f"[警告] 携带 cookies 下载失败，尝试无 cookies 重试: {first_error}")
+            try:
+                return requests.get(url, timeout=timeout)
+            except requests.exceptions.RequestException as second_error:
+                print(f"[网络错误] 尝试下载 {url} 时出错: {second_error}")
+                raise second_error from first_error
+        print(f"[网络错误] 尝试下载 {url} 时出错: {first_error}")
         raise
 
 
@@ -512,7 +518,7 @@ def save_photo_worker(args: tuple) -> None:
             - album_id (str): 相册ID
             - dest_user_qq (str): 目标用户QQ
     """
-    session, user_qq, album_index, album_name, photo_index, photo, qzone_manager, album_id, dest_user_qq = args
+    request_cookies, user_qq, album_index, album_name, photo_index, photo, qzone_manager, album_id, dest_user_qq = args
 
     album_save_path = os.path.join(
         get_save_directory(user_qq), sanitize_filename_component(album_name.strip())
@@ -575,7 +581,7 @@ def save_photo_worker(args: tuple) -> None:
 
     while attempts < APP_CONFIG["max_attempts"]:
         try:
-            response = download_photo_network_helper(session, url, current_timeout)
+            response = download_photo_network_helper(request_cookies, url, current_timeout)
             response.raise_for_status()  # 对错误的响应 (4xx 或 5xx) 引发 HTTPError
 
             if not (photo.is_video and file_extension == ".mp4"):
@@ -863,8 +869,8 @@ class QzonePhotoManager:
             timeout_seconds = APP_CONFIG["timeout_init"]
 
         try:
-            # 使用带 cookie 的会话进行请求
-            response = self.session.get(url, timeout=timeout_seconds)
+            # 直接携带 cookies 请求，避免在线程间共享同一个 Session。
+            response = requests.get(url, cookies=self.cookies, timeout=timeout_seconds)
             response.raise_for_status()  # 检查 HTTP 错误
         except requests.exceptions.RequestException as e:
             print(f"API 请求失败，URL: {url}: {e}")
@@ -1268,7 +1274,7 @@ class QzonePhotoManager:
             for photo_idx, photo_item in enumerate(photos_in_album):
                 all_photo_tasks.append(
                     (
-                        self.session,
+                        dict(self.cookies),
                         dest_user_qq,
                         album_index,
                         album.name,

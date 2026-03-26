@@ -411,18 +411,24 @@ def get_save_directory(user_qq: str) -> str:
 
 
 def download_photo_network_helper(
-    session: requests.Session, url: str, timeout: int
+    request_cookies: dict | None, url: str, timeout: int
 ) -> requests.Response:
     """
-    下载照片的辅助函数，如果需要，首先尝试使用会话下载，然后不使用会话下载。
+    下载照片的辅助函数：优先携带 cookies 请求，失败时再回退到无 cookies 请求。
     """
     try:
-        if session:
-            return session.get(url, timeout=timeout)
-        else:
-            return requests.get(url, timeout=timeout)
-    except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"[网络错误] 尝试下载 {url} 时出错: {e}") from e
+        if request_cookies:
+            return requests.get(url, cookies=request_cookies, timeout=timeout)
+        return requests.get(url, timeout=timeout)
+    except requests.exceptions.RequestException as first_error:
+        if request_cookies:
+            try:
+                return requests.get(url, timeout=timeout)
+            except requests.exceptions.RequestException as second_error:
+                raise ConnectionError(
+                    f"[网络错误] 尝试下载 {url} 时出错（cookies/无cookies均失败）: {second_error}"
+                ) from first_error
+        raise ConnectionError(f"[网络错误] 尝试下载 {url} 时出错: {first_error}") from first_error
 
 
 def save_photo_worker(args: tuple) -> None:
@@ -430,7 +436,7 @@ def save_photo_worker(args: tuple) -> None:
     工作函数，用于下载并保存单张照片或视频。
     在线程池中运行。
     """
-    session, user_qq, album_index, album_name, photo_index, photo, log_signal, progress_signal, is_stopped_func, qzone_manager, album_id, dest_user_qq = args
+    request_cookies, user_qq, album_index, album_name, photo_index, photo, log_signal, progress_signal, is_stopped_func, qzone_manager, album_id, dest_user_qq = args
 
     if is_stopped_func():
         log_signal.emit(f"[停止] 照片下载任务已停止，跳过：相册 '{album_name}', 照片 {photo_index + 1}")
@@ -515,7 +521,7 @@ def save_photo_worker(args: tuple) -> None:
             return
 
         try:
-            response = download_photo_network_helper(session, url, current_timeout)
+            response = download_photo_network_helper(request_cookies, url, current_timeout)
             response.raise_for_status()
 
             if not (photo.is_video and file_extension == ".mp4"):
@@ -676,7 +682,7 @@ class QzonePhotoManager:
         )
         
         try:
-            response = self.session.get(check_url, timeout=APP_CONFIG["timeout_init"])
+            response = requests.get(check_url, cookies=self.cookies, timeout=APP_CONFIG["timeout_init"])
             response.raise_for_status()
             
             # 检查响应内容是否为有效的JSONP格式且不包含错误
@@ -876,7 +882,7 @@ class QzonePhotoManager:
             timeout_seconds = APP_CONFIG["timeout_init"]
 
         try:
-            response = self.session.get(url, timeout=timeout_seconds)
+            response = requests.get(url, cookies=self.cookies, timeout=timeout_seconds)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             self._emit_log(f"API 请求失败，URL: {url}: {e}")
@@ -1305,7 +1311,7 @@ class QzonePhotoManager:
 
                 all_photo_tasks.append(
                     (
-                        self.session,
+                        dict(self.cookies),
                         dest_user_qq,
                         album_index,
                         album.name,
