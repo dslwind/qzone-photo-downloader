@@ -1,1412 +1,166 @@
-import errno
+"""
+QQ空间相册照片下载器 - GUI 入口
+
+基于 PyQt6 的图形界面，所有核心下载逻辑由 core.py 提供。
+"""
+
 import json
-import json_repair
 import logging
 import os
-import random
-import re
-import shutil
 import sys
 import traceback
-from collections import namedtuple
-from concurrent.futures import ThreadPoolExecutor
-from fractions import Fraction
 from logging.handlers import RotatingFileHandler
 
-import piexif
-import requests
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
-                             QLineEdit, QMessageBox, QProgressBar, QPushButton,
-                             QTextEdit, QVBoxLayout, QWidget)
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
-CONFIG_FILE = "config.json"
-CONFIG = {}
+import core
+from core import (
+    APP_CONFIG,
+    CONFIG_FILE,
+    USER_CONFIG,
+    QzonePhotoManager,
+    get_script_directory,
+    load_config,
+)
+
+# ---------------------------------------------------------------------------
+# 日志配置
+# ---------------------------------------------------------------------------
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "app.log")
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
 BACKUP_COUNT = 9
 
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-file_handler = RotatingFileHandler(
+_file_handler = RotatingFileHandler(
     LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8"
 )
-file_handler.setLevel(logging.INFO)
+_file_handler.setLevel(logging.INFO)
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
 
-formatter = logging.Formatter(
+_formatter = logging.Formatter(
     "%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
 )
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
+_file_handler.setFormatter(_formatter)
+_console_handler.setFormatter(_formatter)
 
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+logger.addHandler(_file_handler)
+logger.addHandler(_console_handler)
 
-def load_config():
-    """从配置文件加载配置。"""
-    global CONFIG
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            CONFIG = json.load(f)
-        logger.info(f"成功从 {CONFIG_FILE} 加载配置。")
-    except FileNotFoundError:
-        logger.error(f"错误: 配置文件 {CONFIG_FILE} 未找到。请确保它存在。")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        logger.error(f"错误: 解析配置文件 {CONFIG_FILE} 失败: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"加载配置文件时发生意外错误: {e}")
-        sys.exit(1)
-
-load_config()
-
-APP_CONFIG = {
-    "max_workers": CONFIG.get("max_workers", 10),
-    "timeout_init": CONFIG.get("timeout_init", 30),
-    "max_attempts": CONFIG.get("max_attempts", 3),
-    "is_api_debug": CONFIG.get("is_api_debug", True),
-    "exclude_albums": [name for name in CONFIG.get("exclude_albums", []) if str(name).strip()],
-    "download_path": CONFIG.get("download_path", "qzone_photo"),
-}
-
-USER_CONFIG = {
-    "main_user_qq": CONFIG.get("main_user_qq", "123456"),
-    "main_user_pass": CONFIG.get("main_user_pass", ""),
-    "dest_users_qq": CONFIG.get("dest_users_qq", ["123456",]),
-}
-
-QzoneAlbum = namedtuple("QzoneAlbum", ["uid", "name", "count"])
-QzonePhoto = namedtuple("QzonePhoto", [
-    "url", "name", "album_name", "is_video", "pic_key",
-    "exif_data",    # dict，来自 photo_data["exif"]
-    "shoottime",    # str，来自 rawshoottime，含时分秒
-    "uploadtime",   # str，来自 uploadtime，含时分秒
-    "cameratype",   # str，完整设备名，如 "Apple iPhone 15 Pro Max"
-])
+# core 模块的 logger 也沿用同一套 handlers
+core.logger.addHandler(_file_handler)
+core.logger.addHandler(_console_handler)
+core.logger.setLevel(logging.INFO)
 
 
 # ---------------------------------------------------------------------------
-# 工具函数
+# GuiLogHandler：将 logger 输出路由到 QTextEdit
 # ---------------------------------------------------------------------------
 
-def _str_to_rational(value_str: str) -> tuple | None:
-    """将字符串转为 EXIF rational 元组 (分子, 分母)。"""
-    if not value_str or not value_str.strip():
-        return None
-    try:
-        s = value_str.strip()
-        if "/" in s:
-            num, den = s.split("/", 1)
-            num, den = int(num), int(den)
-            return None if num < 0 or den <= 0 else (num, den)  # ← 过滤负值和零分母
-        frac = Fraction(float(s)).limit_denominator(1_000_000)
-        return None if frac < 0 else (frac.numerator, frac.denominator)  # ← 过滤负值
-    except Exception:
-        return None
 
-
-def _str_to_srational(value_str: str) -> tuple | None:
-    """将字符串转为 EXIF signed rational 元组。"""
-    if not value_str or not value_str.strip():
-        return None
-    try:
-        s = value_str.strip()
-        if "/" in s:
-            num, den = s.split("/", 1)
-            num, den = int(num), int(den)
-            return None if den <= 0 else (num, den)
-        frac = Fraction(float(s)).limit_denominator(1_000_000)
-        return (frac.numerator, frac.denominator)
-    except Exception:
-        return None
-
-
-def _str_to_short(value_str: str) -> int | None:
-    """将字符串转为 EXIF SHORT 整数。"""
-    if not value_str or not value_str.strip():
-        return None
-    try:
-        v = int(float(value_str.strip()))
-        return None if v < 0 else v  # ← 过滤负值
-    except Exception:
-        return None
-
-
-def _ascii_bytes(s: str) -> bytes:
-    """编码为 ASCII bytes，非 ASCII 字符用 ? 替换。"""
-    return s.encode("ascii", errors="replace")
-
-
-def _datetime_str_to_exif(dt_str: str) -> str | None:
-    """
-    将 API 返回的时间字符串转换为 EXIF 标准格式 "YYYY:MM:DD HH:MM:SS"。
-    支持：
-      - "2024-11-24 17:42:10"（rawshoottime、uploadtime 格式）
-      - "2024:11:24 17:42:10"（exif.originalTime 格式，已是标准格式）
-    """
-    if not dt_str or not str(dt_str).strip() or str(dt_str).strip() == "0":
-        return None
-    s = str(dt_str).strip()
-    # 已是 EXIF 格式
-    if re.match(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$", s):
-        return s
-    # "YYYY-MM-DD HH:MM:SS" 格式
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$", s)
-    if m:
-        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} {m.group(4)}"
-    # 仅日期 "YYYY-MM-DD"
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
-    if m:
-        return f"{m.group(1)}:{m.group(2)}:{m.group(3)} 00:00:00"
-    return None
-
-
-def write_exif_to_photo(
-    file_path: str,
-    exif_data: dict,
-    shoottime: str,
-    uploadtime: str,
-    cameratype: str = "",
-) -> None:
-    """
-    将 API 返回的元数据回写至 JPEG 文件的 EXIF。
-    仅对 .jpeg/.jpg 文件有效，出错时静默跳过。
-
-    写入字段一览：
-      Make                 ← exif.make，或从 cameratype 首个品牌词提取
-      Model                ← exif.model 或 cameratype
-      DateTimeOriginal     ← exif.originalTime（优先）或 rawshoottime、uploadtime
-      ExposureTime         ← exif.exposureTime
-      FNumber              ← exif.fnumber
-      ISOSpeedRatings      ← exif.iso
-      FocalLength          ← exif.focalLength
-      Flash                ← exif.flash
-      ExposureMode         ← exif.exposureMode
-      ExposureProgram      ← exif.exposureProgram
-      MeteringMode         ← exif.meteringMode
-      ExposureBiasValue    ← exif.exposureCompensation
-      LensModel            ← exif.lensModel
-    """
-    if file_path.lower().endswith((".jpg", ".jpeg")):
-        try:
-            try:
-                exif_dict = piexif.load(file_path)
-            except Exception:
-                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
-
-            zeroth = exif_dict.setdefault("0th", {})
-            exif   = exif_dict.setdefault("Exif", {})
-
-            # --- 相机厂商 / 完整型号 ---
-            make       = (exif_data.get("make")  or "").strip()
-            exif_model = (exif_data.get("model") or "").strip()
-            cameratype = (cameratype or "").strip()
-
-            # 若 exif.make 为空，尝试从 cameratype 首个已知品牌前缀提取
-            extracted_brand = ""
-            if not make and cameratype:
-                known_makes = [
-                    "Apple", "Samsung", "SONY", "HUAWEI", "Xiaomi", "ASUS",
-                    "Google", "OnePlus", "OPPO", "vivo", "Canon", "Nikon",
-                    "Fujifilm", "Panasonic", "Leica", "DJI", "GoPro",
-                ]
-                for brand in known_makes:
-                    if cameratype.startswith(brand):
-                        extracted_brand = brand
-                        make = brand
-                        break
-
-            # Model：优先 exif.model，退回 cameratype
-            # 若从 cameratype 提取了品牌，Model 只写品牌之后的部分，避免与 Make 重复
-            if exif_model:
-                zeroth[piexif.ImageIFD.Model] = _ascii_bytes(exif_model)
-            elif cameratype:
-                model_str = cameratype[len(extracted_brand):].strip() if extracted_brand else cameratype
-                if model_str:
-                    zeroth[piexif.ImageIFD.Model] = _ascii_bytes(model_str)
-
-            if make:
-                zeroth[piexif.ImageIFD.Make] = _ascii_bytes(make)
-
-
-            # --- 拍摄时间 → DateTimeOriginal ---
-            # 优先使用 exif.originalTime（来自相机固件，最准确）
-            original_time = _datetime_str_to_exif(exif_data.get("originalTime", ""))
-            if original_time:
-                exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(original_time)
-            elif shoottime:
-                # 退回到 rawshoottime
-                shoot_exif = _datetime_str_to_exif(shoottime)
-                if shoot_exif:
-                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
-            else:
-                shoot_exif = _datetime_str_to_exif(uploadtime)
-                if shoot_exif:
-                    exif[piexif.ExifIFD.DateTimeOriginal] = _ascii_bytes(shoot_exif)
-
-            # --- 曝光时间 ---
-            r = _str_to_rational(exif_data.get("exposureTime", ""))
-            if r:
-                exif[piexif.ExifIFD.ExposureTime] = r
-
-            # --- 光圈值 ---
-            r = _str_to_rational(exif_data.get("fnumber", ""))
-            if r:
-                exif[piexif.ExifIFD.FNumber] = r
-
-            # --- ISO ---
-            iso = _str_to_short(exif_data.get("iso", ""))
-            if iso is not None:
-                exif[piexif.ExifIFD.ISOSpeedRatings] = iso
-
-            # --- 焦距 ---
-            r = _str_to_rational(exif_data.get("focalLength", ""))
-            if r:
-                exif[piexif.ExifIFD.FocalLength] = r
-
-            # --- 闪光灯 ---
-            flash = _str_to_short(exif_data.get("flash", ""))
-            if flash is not None:
-                exif[piexif.ExifIFD.Flash] = flash
-
-            # --- 曝光模式 ---
-            em = _str_to_short(exif_data.get("exposureMode", ""))
-            if em is not None:
-                exif[piexif.ExifIFD.ExposureMode] = em
-
-            # --- 曝光程序 ---
-            ep = _str_to_short(exif_data.get("exposureProgram", ""))
-            if ep is not None:
-                exif[piexif.ExifIFD.ExposureProgram] = ep
-
-            # --- 测光模式 ---
-            mm = _str_to_short(exif_data.get("meteringMode", ""))
-            if mm is not None:
-                exif[piexif.ExifIFD.MeteringMode] = mm
-
-            # --- 曝光补偿 ---
-            sr = _str_to_srational(exif_data.get("exposureCompensation", ""))
-            if sr is not None:
-                exif[piexif.ExifIFD.ExposureBiasValue] = sr
-
-            # --- 镜头型号 ---
-            lens = (exif_data.get("lensModel") or "").strip()
-            if lens:
-                exif[piexif.ExifIFD.LensModel] = _ascii_bytes(lens)
-
-            exif_bytes = piexif.dump(exif_dict)
-            piexif.insert(exif_bytes, file_path)
-
-        except Exception as e:
-            logger.warning(f"[EXIF] 回写失败，文件 {file_path}: {e}")
-
-    dt_str = (
-        _datetime_str_to_exif(exif_data.get("originalTime", ""))
-        or _datetime_str_to_exif(shoottime)
-        or _datetime_str_to_exif(uploadtime)
-    )
-    if dt_str:
-        try:
-            import time
-            t = time.mktime(time.strptime(dt_str, "%Y:%m:%d %H:%M:%S"))
-            os.utime(file_path, (t, t))
-        except Exception as e:
-            print(f"[mtime] 写入文件修改日期失败，文件 {file_path}: {e}")
-
-    if not file_path.lower().endswith((".jpg", ".jpeg")):
-        return
-
-
-
-
-def get_script_directory() -> str:
-    """获取脚本文件所在的绝对路径。"""
-    return os.path.dirname(os.path.realpath(__file__))
-
-
-def is_path_valid(pathname: str) -> bool:
-    """
-    检查给定路径名在当前操作系统中是否（可能）有效。
-    主要依赖 os.path.normpath 和一次 os.lstat 调用。
-    """
-    if not isinstance(pathname, str) or not pathname:
-        return False
-    if "\0" in pathname:
-        return False
-    try:
-        normalized_pathname = os.path.normpath(pathname)
-        if not normalized_pathname:
-            return False
-    except ValueError:
-        return False
-    except Exception:
-        return False
-    try:
-        os.lstat(normalized_pathname)
-        return True
-    except OSError as exc:
-        if exc.errno == errno.ENOENT:
-            return True
-        elif (
-            hasattr(exc, "winerror") and exc.winerror == 123
-        ):
-            return False
-        elif exc.errno in [errno.ENAMETOOLONG, errno.ELOOP]:
-            return False
-        elif exc.errno == errno.EINVAL:
-            drive, tail = os.path.splitdrive(normalized_pathname)
-            if os.name == "nt" and drive == normalized_pathname and not tail:
-                return True
-            else:
-                return False
-        else:
-            return False
-    except Exception:
-        return False
-
-
-def sanitize_filename_component(name_component: str) -> str:
-    """
-    安全处理文件名组件，替换所有非法字符为下划线。
-    """
-    if not isinstance(name_component, str):
-        raise TypeError("输入必须是字符串类型")
-    illegal_chars = r'[\/\\:*?"<>|\0]'
-    return re.sub(illegal_chars, "_", name_component)
-
-def _detect_image_extension(content: bytes) -> str:
-    """通过文件头魔术字节判断图片格式，返回对应扩展名。"""
-    if content[:3] == b'\xff\xd8\xff':
-        return ".jpeg"
-    if content[:4] == b'\x89PNG':
-        return ".png"
-    if content[:6] in (b'GIF87a', b'GIF89a'):
-        return ".gif"
-    if content[:4] == b'RIFF' and content[8:12] == b'WEBP':
-        return ".webp"
-    # 兜底仍用 jpeg
-    return ".jpeg"
-
-def get_save_directory(user_qq: str) -> str:
-    """确定给定用户的照片保存目录。"""
-    download_path = APP_CONFIG.get("download_path", "downloads")
-    return os.path.join(get_script_directory(), download_path, str(user_qq))
-
-
-def download_photo_network_helper(
-    request_cookies: dict | None, url: str, timeout: int
-) -> requests.Response:
-    """
-    下载照片的辅助函数：优先携带 cookies 请求，失败时再回退到无 cookies 请求。
-    """
-    try:
-        if request_cookies:
-            return requests.get(url, cookies=request_cookies, timeout=timeout)
-        return requests.get(url, timeout=timeout)
-    except requests.exceptions.RequestException as first_error:
-        if request_cookies:
-            try:
-                return requests.get(url, timeout=timeout)
-            except requests.exceptions.RequestException as second_error:
-                raise ConnectionError(
-                    f"[网络错误] 尝试下载 {url} 时出错（cookies/无cookies均失败）: {second_error}"
-                ) from first_error
-        raise ConnectionError(f"[网络错误] 尝试下载 {url} 时出错: {first_error}") from first_error
-
-
-def save_photo_worker(args: tuple) -> None:
-    """
-    工作函数，用于下载并保存单张照片或视频。
-    在线程池中运行。
-    """
-    request_cookies, user_qq, album_index, album_name, photo_index, photo, log_signal, progress_signal, is_stopped_func, qzone_manager, album_id, dest_user_qq = args
-
-    if is_stopped_func():
-        log_signal.emit(f"[停止] 照片下载任务已停止，跳过：相册 '{album_name}', 照片 {photo_index + 1}")
-        logger.info(f"[停止] 照片下载任务已停止，跳过：相册 '{album_name}', 照片 {photo_index + 1}")
-        progress_signal.emit(1)
-        return
-
-    album_save_path = os.path.join(
-        get_save_directory(user_qq), sanitize_filename_component(album_name.strip())
-    )
-    if not os.path.exists(album_save_path):
-        try:
-            os.makedirs(album_save_path, exist_ok=True)
-        except OSError as e:
-            log_signal.emit(f"[错误] 无法创建目录 {album_save_path}: {e}")
-            logger.error(f"[错误] 无法创建目录 {album_save_path}: {e}")
-            return
-
-    photo_name_sanitized = sanitize_filename_component(photo.name)
-    base_filename = f"{photo_index}_{photo_name_sanitized}"
-
-    # 如果是视频，尝试获取真实的视频下载URL
-    download_url = photo.url
-    file_extension = ".jpeg"
-
-    if photo.is_video:
-        log_signal.emit(f"[检测到视频] 正在获取真实视频下载链接: '{photo.name}'")
-        logger.info(f"[检测到视频] 正在获取真实视频下载链接: '{photo.name}'")
-
-        # 调用API获取视频下载URL
-        video_url = qzone_manager.get_video_download_url(dest_user_qq, album_id, photo.pic_key)
-
-        if video_url:
-            download_url = video_url
-            file_extension = ".mp4"
-            final_filename = f"{base_filename}{file_extension}"
-            full_photo_path = os.path.join(album_save_path, final_filename)
-
-            if not is_path_valid(full_photo_path):
-                log_signal.emit(f"[警告] 原始视频文件名无效: {final_filename}。将使用随机名称。")
-                logger.warning(f"[警告] 原始视频文件名无效: {final_filename}。将使用随机名称。")
-                final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
-                full_photo_path = os.path.join(album_save_path, final_filename)
-                if not is_path_valid(full_photo_path):
-                    log_signal.emit(f"[错误] 备用视频文件名也无效，跳过视频: {photo.url}")
-                    logger.error(f"[错误] 备用视频文件名也无效，跳过视频: {photo.url}")
-                    progress_signal.emit(1)
-                    return
-
-            if os.path.exists(full_photo_path):
-                log_signal.emit(f"[本地已存在] 相册 '{album_name}', 视频 {photo_index + 1} ('{photo.name}')")
-                logger.info(f"[本地已存在] 相册 '{album_name}', 视频 {photo_index + 1} ('{photo.name}')")
-                progress_signal.emit(1)
-                return
-
-            log_signal.emit(f"[成功] 获取到视频{base_filename}下载链接")
-            logger.info(f"[成功] 获取到视频{base_filename}下载链接")
-        else:
-            log_signal.emit(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替")
-            logger.warning(f"[失败] 无法获取视频{base_filename}下载链接，将下载视频封面图代替: {photo.name}")
-            base_filename = f"{photo_index}_{photo_name_sanitized}_视频封面"
-            final_filename = ""
-            full_photo_path = ""
-    else:
-        # 照片：先下载，检测扩展名后再做路径检查
-        final_filename = ""
-        full_photo_path = ""
-
-    url = download_url.replace("\\", "")
-    attempts = 0
-    current_timeout = APP_CONFIG["timeout_init"]
-
-    download_type = "视频" if photo.is_video and file_extension == ".mp4" else "照片"
-    log_signal.emit(f"[开始下载] 相册 '{album_name}', {download_type} {photo_index + 1} ('{photo.name}')")
-    logger.info(f"[开始下载] 相册 '{album_name}', {download_type} {photo_index + 1} ('{photo.name}')")
-
-    while attempts < APP_CONFIG["max_attempts"]:
-        if is_stopped_func():
-            log_signal.emit(f"[停止] 照片下载任务已停止，跳过重试：相册 '{album_name}', 照片 {photo_index + 1}")
-            logger.info(f"[停止] 照片下载任务已停止，跳过重试：相册 '{album_name}', 照片 {photo_index + 1}")
-            progress_signal.emit(1)
-            return
-
-        try:
-            response = download_photo_network_helper(request_cookies, url, current_timeout)
-            response.raise_for_status()
-
-            if not (photo.is_video and file_extension == ".mp4"):
-                # 此时才能确定扩展名和最终路径
-                file_extension = _detect_image_extension(response.content)
-                final_filename = f"{base_filename}{file_extension}"
-                full_photo_path = os.path.join(album_save_path, final_filename)
-
-                if not is_path_valid(full_photo_path):
-                    log_signal.emit(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-                    logger.warning(f"[警告] 原始文件名无效: {final_filename}。将使用随机名称。")
-                    final_filename = f"random_name_{album_index}_{photo_index}{file_extension}"
-                    full_photo_path = os.path.join(album_save_path, final_filename)
-                    if not is_path_valid(full_photo_path):
-                        log_signal.emit(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
-                        logger.error(f"[错误] 备用文件名也无效，跳过照片: {photo.url}")
-                        progress_signal.emit(1)
-                        return
-
-                if os.path.exists(full_photo_path):
-                    log_signal.emit(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
-                    logger.info(f"[本地已存在] 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}')")
-                    progress_signal.emit(1)
-                    return
-
-            with open(full_photo_path, "wb") as f:
-                f.write(response.content)
-
-            # EXIF 回写（仅对 .jpeg/.jpg 有效，视频 .mp4 会被内部静默跳过）
-            write_exif_to_photo(
-                full_photo_path,
-                photo.exif_data,
-                photo.shoottime,
-                photo.uploadtime,
-                photo.cameratype,
-            )
-
-            log_signal.emit(
-                f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s"
-            )
-            logger.info(f"[下载成功] 相册 '{album_name}', 照片 {photo_index + 1}。尝试次数: {attempts + 1}, 超时时间: {current_timeout}s")
-            progress_signal.emit(1)
-            return
-        except (
-            requests.exceptions.ReadTimeout,
-            requests.exceptions.ConnectionError,
-        ) as e:
-            attempts += 1
-            current_timeout += 5
-            log_signal.emit(
-                f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}"
-            )
-            logger.warning(
-                f"[重试下载] 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}, 新超时时间: {current_timeout}s。错误: {e}"
-            )
-        except requests.exceptions.HTTPError as e:
-            log_signal.emit(
-                f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。"
-            )
-            logger.error(
-                f"[HTTP 错误] 下载 {url} 失败 (相册 '{album_name}', 照片 {photo_index + 1})。状态码: {e.response.status_code}。中止下载此照片。"
-            )
-            progress_signal.emit(1)
-            return
-        except Exception as e:
-            attempts += 1
-            log_signal.emit(
-                f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}"
-            )
-            logger.error(
-                f"[意外错误] 重试下载 {url}, 相册 '{album_name}', 照片 {photo_index + 1}。尝试 {attempts}/{APP_CONFIG['max_attempts']}。错误: {e}"
-            )
-
-    log_signal.emit(
-        f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)"
-    )
-    logger.error(
-        f"[下载失败] 用户: {user_qq}, 相册 '{album_name}', 照片 {photo_index + 1} ('{photo.name}') URL: {photo.url} (尝试 {APP_CONFIG['max_attempts']} 次后)"
-    )
-    progress_signal.emit(1)
-
-
-class QzonePhotoManager:
-    """管理 QQ 空间相册和照片的获取与下载。"""
-
-    ALBUM_LIST_URL_TEMPLATE = (
-        "https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?"
-        "g_tk={gtk}&t={t}&hostUin={dest_user}&uin={user}"
-        "&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp"
-        "&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1"
-        "&idcNum=4&callbackFun=shine0&callback=shine0_Callback"
-    )
-
-    ALBUM_LIST_URL_WITH_PAGE_TEMPLATE = (
-        "https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/fcg_list_album_v3?"
-        "g_tk={gtk}&t={t}&hostUin={dest_user}&uin={user}"
-        "&appid=4&inCharset=utf-8&outCharset=utf-8&source=qzone&plat=qzone&format=jsonp"
-        "&notice=0&filter=1&handset=4&pageNumModeSort=40&pageNumModeClass=15&needUserInfo=1"
-        "&idcNum=4&callbackFun=shine{fn}&mode=2&sortOrder=2&pageStart={pageStart}&pageNum={pageNum}&callback=shine{fn}_Callback"
-    )
-
-    PHOTO_LIST_URL_TEMPLATE = (
-        "https://h5.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/"
-        "cgi_list_photo?g_tk={gtk}&t={t}&mode=0&idcNum=4&hostUin={dest_user}"
-        "&topicId={album_id}&noTopic=0&uin={user}&pageStart={pageStart}&pageNum={pageNum}"
-        "&skipCmtCount=0&singleurl=1&batchId=&notice=0&appid=4&inCharset=utf-8&outCharset=utf-8"
-        "&source=qzone&plat=qzone&outstyle=json&format=jsonp&json_esc=1&question=&answer="
-        "&callbackFun=shine0&callback=shine0_Callback"
-    )
-
-    # 获取视频详情的API URL模板
-    VIDEO_DETAIL_URL_TEMPLATE = (
-        "https://user.qzone.qq.com/proxy/domain/photo.qzone.qq.com/fcgi-bin/"
-        "cgi_floatview_photo_list_v2?g_tk={gtk}&t={t}&topicId={album_id}&picKey={pic_key}"
-        "&shootTime=&cmtOrder=1&fupdate=1&plat=qzone&source=qzone&cmtNum=10&likeNum=5"
-        "&inCharset=utf-8&outCharset=utf-8&callbackFun=viewer&offset=0&number=15"
-        "&uin={user}&hostUin={dest_user}&appid=4&isFirst=1&sortOrder=1&showMode=1"
-        "&need_private_comment=1&prevNum=9&postNum=18"
-    )
-
-    def __init__(self, user_qq: str, log_signal=None, is_stopped_func=None):
-        """
-        初始化 QzonePhotoManager。
-        """
-        self.user_qq = str(user_qq)
-        self.cookies = {}
-        self.session = requests.Session()
-        self.qzone_g_tk = ""
-        self.log_signal = log_signal
-        self.is_stopped_func = is_stopped_func if is_stopped_func is not None else (lambda: False)
-        self.total_albums = 0
-
-    def _emit_log(self, message: str):
-        """
-        如果信号可用，则向 GUI 发送日志消息。
-        同时使用 logger 记录消息。
-        """
-        if self.log_signal:
-            self.log_signal.emit(message)  # type: ignore
-        logger.info(message)
-
-    def _check_cookie_validity(self) -> bool:
-        """
-        检查当前cookie是否有效。
-        通过尝试访问相册列表API来验证cookie有效性。
-        """
-        if not self.cookies or not self.qzone_g_tk:
-            self._emit_log("Cookie或g_tk为空，无法验证有效性。")
-            return False
-            
-        # 使用相册列表API来检查cookie有效性
-        # 这里使用自己的QQ号作为目标用户来测试cookie是否有效
-        check_url = self.ALBUM_LIST_URL_TEMPLATE.format(
-            gtk=self.qzone_g_tk,
-            t=random.random(),
-            dest_user=self.user_qq,  # 使用自己的QQ号作为目标用户
-            user=self.user_qq,
-        )
-        
-        try:
-            response = requests.get(check_url, cookies=self.cookies, timeout=APP_CONFIG["timeout_init"])
-            response.raise_for_status()
-            
-            # 检查响应内容是否为有效的JSONP格式且不包含错误
-            text_content = response.text
-            if ((text_content.startswith("shine0_Callback(") and text_content.endswith(");")) or
-                (text_content.startswith("_Callback(") and text_content.endswith(");"))):
-                # 尝试解析JSON内容
-                if text_content.startswith("shine0_Callback("):
-                    json_str = text_content[len("shine0_Callback(") : -2]
-                else:
-                    json_str = text_content[len("_Callback(") : -2]
-                
-                try:
-                    data = json.loads(json_str)
-                    # 检查返回码是否为0（成功）
-                    if data.get("code", -1) == 0:
-                        self._emit_log("Cookie验证成功，可以继续使用。")
-                        return True
-                    else:
-                        self._emit_log(f"Cookie验证失败，API返回错误码: {data.get('code', '未知')}")
-                        return False
-                except json.JSONDecodeError:
-                    self._emit_log("Cookie验证失败，无法解析API响应。")
-                    return False
-            else:
-                self._emit_log("Cookie验证失败，API响应格式不正确。")
-                return False
-        except requests.exceptions.RequestException as e:
-            self._emit_log(f"Cookie验证请求失败: {e}")
-            return False
-        except Exception as e:
-            self._emit_log(f"Cookie验证过程中发生错误: {e}")
-            return False
-
-    def _set_cookies_and_gtk(self, cookies: dict, g_tk: str):
-        """
-        设置cookie和g_tk，用于复用已有的登录信息。
-        
-        Args:
-            cookies (dict): cookie字典
-            g_tk (str): g_tk值
-        """
-        self.cookies = cookies
-        self.qzone_g_tk = g_tk
-        
-        # 更新会话中的cookie
-        for cookie_name, cookie_value in self.cookies.items():
-            self.session.cookies.set(cookie_name, cookie_value)
-            
-        self._emit_log("已设置cookie和g_tk。")
-
-    def _resolve_chromedriver_path(self) -> str:
-        """解析可用的 ChromeDriver 路径。
-
-        优先级：脚本目录 > 系统 PATH > webdriver_manager 自动下载。
-        """
-        driver_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
-        local_path = os.path.join(get_script_directory(), driver_name)
-        if os.path.exists(local_path):
-            return local_path
-
-        system_driver = shutil.which(driver_name)
-        if system_driver:
-            return system_driver
-
-        self._emit_log("未在脚本目录或系统 PATH 中找到 ChromeDriver，尝试自动下载匹配版本...")
-        return ChromeDriverManager().install()
-
-    def _apply_anti_detection_patches(self, driver: webdriver.Chrome) -> None:
-        """尽力应用浏览器伪装设置；失败时仅记录告警。"""
-        try:
-            driver.execute_cdp_cmd(
-                "Network.setUserAgentOverride",
-                {
-                    "userAgent": driver.execute_script(
-                        "return navigator.userAgent"
-                    ).replace("Headless", "")
-                },
-            )
-        except Exception as e:
-            self._emit_log(f"[警告] 设置 User-Agent 覆盖失败，继续执行: {e}")
-            logger.warning(f"设置 User-Agent 覆盖失败: {e}")
-
-        try:
-            driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {
-                    "source": """
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    })
-                """
-                },
-            )
-        except Exception as e:
-            self._emit_log(f"[警告] 注入 webdriver 伪装脚本失败，继续执行: {e}")
-            logger.warning(f"注入 webdriver 伪装脚本失败: {e}")
-
-    def _login_and_get_cookies(self):
-        """
-        使用 Selenium 登录 QQ 空间以获取必要的 cookie。
-        自动下载和设置 ChromeDriver。
-        """
-        self._emit_log("尝试启动 Chrome 进行登录...")
-        options = webdriver.ChromeOptions()
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--lang=zh-CN")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-
-        driver_path = None
-        try:
-            driver_path = self._resolve_chromedriver_path()
-            service = ChromeService(executable_path=driver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-            self._apply_anti_detection_patches(driver)
-        except Exception as e:
-            self._emit_log(f"启动 ChromeDriver 失败。错误: {e}")
-            self._emit_log(f"尝试使用的驱动路径: {driver_path}")
-            self._emit_log(
-                "如果问题仍然存在，您可以从以下地址手动下载 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing"
-            )
-            logger.exception("启动 ChromeDriver 失败。")
-            raise
-
-        driver.get("https://user.qzone.qq.com")
-        self._emit_log("请在浏览器窗口中登录 QQ 空间。脚本将在登录后继续...")
-
-        LOGIN_TIMEOUT = 300
-
-        try:
-            wait = WebDriverWait(driver, LOGIN_TIMEOUT)
-            logged_in = wait.until(
-                EC.any_of(
-                    EC.presence_of_element_located((By.ID, "QM_OwnerInfo_Icon")),
-                    EC.presence_of_element_located((By.ID, "QZ_Toolbar_Container")),
-                    EC.presence_of_element_located((By.ID, "QM_Mood_Poster_Container")),
-                )
-            )
-
-            if not logged_in:
-                raise TimeoutException("登录超时或无法确认登录状态")
-
-        except TimeoutException:
-            self._emit_log(f"错误: {LOGIN_TIMEOUT}秒内未检测到成功登录")
-            self._emit_log("建议：1) 确保网络正常 2) 可能需要手动处理验证码")
-            logger.error(f"登录超时或无法确认登录状态 ({LOGIN_TIMEOUT}秒)。")
-            driver.quit()
-            raise
-        except Exception as e:
-            self._emit_log(f"登录过程中发生意外错误: {e}")
-            logger.exception("登录过程中发生意外错误。")
-            driver.quit()
-            raise
-
-        selenium_cookies = driver.get_cookies()
-        if not selenium_cookies:
-            self._emit_log("获取 cookie 失败。登录可能失败或 cookie 无法访问。")
-            logger.error("获取 cookie 失败。")
-            driver.quit()
-            raise Exception("获取 cookie 失败")
-
-        self.cookies = {c["name"]: c["value"] for c in selenium_cookies}
-
-        for cookie_name, cookie_value in self.cookies.items():
-            self.session.cookies.set(cookie_name, cookie_value)
-
-        p_skey = self.cookies.get("p_skey") or self.cookies.get("skey")
-        if not p_skey:
-            self._emit_log("错误: 在 cookie 中未找到 'p_skey' 或 'skey'。无法计算 g_tk。")
-            self._emit_log(f"可用的 cookies: {list(self.cookies.keys())}")
-            logger.error("在 cookie 中未找到 'p_skey' 或 'skey'。")
-            driver.quit()
-            raise Exception("无法计算 g_tk")
-
-        self.qzone_g_tk = self._calculate_g_tk(p_skey)
-        self._emit_log("成功获取 cookie 和 g_tk。")
-        if APP_CONFIG["is_api_debug"]:
-            self._emit_log(f"cookie: {self.cookies}")
-            self._emit_log(f"g_tk: {self.qzone_g_tk}")
-            logger.debug(f"cookie: {self.cookies}, g_tk: {self.qzone_g_tk}")
-
-        driver.quit()
-
-    def _calculate_g_tk(self, p_skey: str) -> int:
-        """根据 p_skey 计算 g_tk。"""
-        hash_val = 5381
-        for char in p_skey:
-            hash_val += (hash_val << 5) + ord(char)
-        return hash_val & 0x7FFFFFFF
-
-    def _access_qzone_api(self, url: str, timeout_seconds: int | None = None) -> dict:
-        """访问 QQ 空间 API 端点并解析 JSONP 响应。"""
-        if timeout_seconds is None:
-            timeout_seconds = APP_CONFIG["timeout_init"]
-
-        try:
-            response = requests.get(url, cookies=self.cookies, timeout=timeout_seconds)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            self._emit_log(f"API 请求失败，URL: {url}: {e}")
-            logger.error(f"API 请求失败，URL: {url}: {e}")
-            return {}
-
-        text_content = response.text
-        # 支持多种JSONP回调格式
-        if text_content.startswith("shine0_Callback(") and text_content.endswith(");"):
-            json_str = text_content[len("shine0_Callback(") : -2]
-        elif text_content.startswith("viewer_Callback(") and text_content.endswith(");"):
-            json_str = text_content[len("viewer_Callback(") : -2]
-        elif text_content.startswith("_Callback(") and text_content.endswith(");"):
-            json_str = text_content[len("_Callback(") : -2]
-        else:
-            # 尝试使用正则表达式匹配任意回调函数名
-            import re
-            match = re.match(r'^\w+_Callback\((.*)\);?$', text_content, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                if APP_CONFIG["is_api_debug"]:
-                    self._emit_log(
-                        f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}"
-                    )
-                    logger.warning(
-                        f"意外的 API 响应格式 (没有已知的 JSONP 包装器): {text_content[:200]}"
-                    )
-                json_str = text_content
-
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON 解码失败，尝试修复: {e}")
-            try:
-                repaired = json_repair.repair_json(json_str, return_objects=True)
-                if repaired:
-                    logger.warning(f"JSON 修复成功")
-                    return repaired
-            except Exception as repair_err:
-                logger.error(f"JSON 修复也失败: {repair_err}")
-            self._emit_log(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
-            logger.error(f"JSON 解码失败，响应内容: {json_str[:200]}... 错误: {e}")
-            if APP_CONFIG["is_api_debug"]:
-                self._emit_log(f"有问题的完整 JSON 字符串: {json_str}")
-                logger.debug(f"有问题的完整 JSON 字符串: {json_str}")
-            return {}
-
-    def get_video_download_url(self, dest_user_qq: str, album_id: str, pic_key: str) -> str:
-        """
-        获取视频的真实下载URL。
-
-        Args:
-            dest_user_qq (str): 目标用户的QQ号
-            album_id (str): 相册ID
-            pic_key (str): 照片/视频的唯一标识（来自lloc或sloc字段）
-
-        Returns:
-            str: 视频的MP4下载URL，如果获取失败则返回空字符串
-        """
-        url = self.VIDEO_DETAIL_URL_TEMPLATE.format(
-            gtk=self.qzone_g_tk,
-            t=random.random(),
-            album_id=album_id,
-            pic_key=pic_key,
-            user=self.user_qq,
-            dest_user=dest_user_qq,
-        )
-
-        if APP_CONFIG["is_api_debug"]:
-            self._emit_log(f"正在获取视频详情: {url}")
-            logger.debug(f"正在获取视频详情: {url}")
-
-        data = self._access_qzone_api(url)
-
-        if APP_CONFIG["is_api_debug"]:
-            self._emit_log(f"视频详情 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}")
-            logger.debug(f"视频详情 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}")
-
-        if not data or not data.get("data"):
-            self._emit_log(f"获取视频详情失败，pic_key: {pic_key}")
-            logger.warning(f"获取视频详情失败，pic_key: {pic_key}")
-            return ""
-
-        # 解析响应，查找视频下载URL
-        try:
-            photos = data["data"].get("photos", [])
-            if not photos:
-                self._emit_log(f"视频详情响应中没有找到photos数据")
-                logger.warning(f"视频详情响应中没有找到photos数据")
-                return ""
-
-            # 通过picKey匹配找到正确的视频
-            photo_data = None
-            for photo in photos:
-                # 匹配picKey或lloc字段
-                if photo.get("picKey") == pic_key or photo.get("lloc") == pic_key:
-                    photo_data = photo
-                    break
-
-            # 如果没有匹配到，尝试查找第一个视频
-            if not photo_data:
-                for photo in photos:
-                    if photo.get("is_video") or photo.get("video_info"):
-                        photo_data = photo
-                        break
-
-            # 仍然没有找到，使用第一个
-            if not photo_data:
-                photo_data = photos[0]
-
-            video_info = photo_data.get("video_info", {})
-
-            if not video_info:
-                self._emit_log(f"照片数据中没有video_info字段，is_video={photo_data.get('is_video')}")
-                logger.warning(f"照片数据中没有video_info字段: {photo_data.get('name', 'unknown')}, picKey={photo_data.get('picKey', 'N/A')}")
-                return ""
-
-            # 优先使用download_url（MP4格式）
-            download_url = video_info.get("download_url", "")
-            if download_url:
-                self._emit_log(f"成功获取视频下载URL: {download_url[:100]}...")
-                logger.info(f"成功获取视频下载URL")
-                return download_url
-
-            # 如果没有download_url，尝试使用video_url（m3u8格式，暂不支持）
-            video_url = video_info.get("video_url", "")
-            if video_url:
-                self._emit_log(f"警告: 仅找到m3u8格式的视频URL，当前版本暂不支持下载")
-                logger.warning(f"仅找到m3u8格式的视频URL: {video_url}")
-                return ""
-
-            self._emit_log(f"video_info中没有可用的下载URL")
-            logger.warning(f"video_info中没有可用的下载URL: {video_info}")
-            return ""
-
-        except Exception as e:
-            self._emit_log(f"解析视频详情时出错: {e}")
-            logger.exception(f"解析视频详情时出错")
-            return ""
-
-    def get_albums_by_page(self, dest_user_qq: str) -> list[QzoneAlbum]:
-        self.total_albums = 0
-        pageStart = 0
-        allAlbums = []
-        while self.total_albums == 0 or pageStart < self.total_albums:
-            albums = self.get_albums(dest_user_qq, pageStart)
-            if len(albums) == 0:
-                break
-            pageStart += len(albums)
-            allAlbums.extend(albums)
-        return allAlbums
-
-    def get_albums(self, dest_user_qq: str, pageStart: int = 0, pageNum: int = 32) -> list[QzoneAlbum]:
-        """获取给定用户的相册列表。"""
-        albums = []
-        if pageStart == 0:
-            url = self.ALBUM_LIST_URL_TEMPLATE.format(
-                gtk=self.qzone_g_tk,
-                t=random.random(),
-                dest_user=dest_user_qq,
-                user=self.user_qq,
-            )
-        else:
-            url = self.ALBUM_LIST_URL_WITH_PAGE_TEMPLATE.format(
-                gtk=self.qzone_g_tk,
-                t=random.random(),
-                dest_user=dest_user_qq,
-                user=self.user_qq,
-                pageStart=pageStart,
-                pageNum=pageNum,
-                fn=0
-            )        
-        if APP_CONFIG["is_api_debug"]:
-            self._emit_log(f"正在从以下地址获取相册: {url}")
-            logger.debug(f"正在从以下地址获取相册: {url}")
-
-        data = self._access_qzone_api(url)
-        if APP_CONFIG["is_api_debug"]:
-            dump = json.dumps(
-                data,
-                indent=2,
-                ensure_ascii=False,
-            )
-            self._emit_log(f"相册 API 响应数据: {dump}")
-            logger.debug(f"相册 API 响应数据: {dump}")
-
-        if not data or not data.get("data"):
-            logger.warning(f"获取相册列表失败或没有数据：{data}")
-            return albums
-
-        album_data = data["data"]
-        if self.total_albums == 0:
-            self.total_albums = album_data.get("albumsInUser", 0)
-        if "albumListModeSort" in album_data:  # 普通视图
-            album_list = album_data["albumListModeSort"]
-        elif "albumListModeClass" in album_data:  # 列表视图
-            album_list = [
-                item
-                for d in album_data["albumListModeClass"]
-                for item in d.get("albumList", [])
-            ]
-        elif "albumList" in album_data:
-            album_list = album_data["albumList"]
-        else:
-            album_list = []
-
-        if album_list:
-            for album in album_list:
-                albums.append(
-                    QzoneAlbum(
-                        uid=album["id"],
-                        name=album["name"],
-                        count=album["total"],
-                    )
-                )
-        elif "albumlist" in album_data:
-            for album in album_data["albumlist"]:
-                albums.append(
-                    QzoneAlbum(
-                        uid=album["albumid"],
-                        name=album["name"],
-                        count=album.get("total", album.get("picnum", 0)),
-                    )
-                )
-
-        if APP_CONFIG["is_api_debug"]:
-            self._emit_log(f"找到的相册: {albums}")
-            logger.debug(f"找到的相册: {albums}")
-        return albums
-
-    def get_photos_from_album(
-        self, dest_user_qq: str, album: QzoneAlbum
-    ) -> list[QzonePhoto]:
-        """从特定相册获取所有照片。"""
-        photos = []
-        page_start = 0
-        page_num_to_fetch = 500
-
-        while True:
-            if self.is_stopped_func():
-                self._emit_log(f"[停止] 照片获取任务已停止，跳过相册 '{album.name}' 的后续页面。")
-                logger.info(f"[停止] 照片获取任务已停止，跳过相册 '{album.name}' 的后续页面。")
-                break
-
-            url = self.PHOTO_LIST_URL_TEMPLATE.format(
-                gtk=self.qzone_g_tk,
-                t=random.random(),
-                dest_user=dest_user_qq,
-                user=self.user_qq,
-                album_id=album.uid,
-                pageStart=page_start,
-                pageNum=page_num_to_fetch,
-            )
-            if APP_CONFIG["is_api_debug"]:
-                self._emit_log(f"正在从以下地址获取照片: {url}")
-                logger.debug(f"正在从以下地址获取照片: {url}")
-
-            data = self._access_qzone_api(url)
-            if APP_CONFIG["is_api_debug"]:
-                self._emit_log(
-                    f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}"
-                )
-                logger.debug(
-                    f"相册 '{album.name}' (页码起点 {page_start}) 的照片列表 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)}"
-                )
-
-            if not data or not data.get("data"):
-                if data and data.get("code", 0) != 0:
-                    self._emit_log(
-                        f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}"
-                    )
-                    logger.error(
-                        f"相册 '{album.name}' API 错误: code {data.get('code')}, message: {data.get('message')}, subcode: {data.get('subcode')}"
-                    )
-                break
-
-            api_data_section = data["data"]
-            total_in_album = api_data_section.get("totalInAlbum", 0)
-            photos_in_page = api_data_section.get(
-                "totalInPage", 0
-            )
-
-            if total_in_album == 0:
-                self._emit_log(f"相册 '{album.name}' (ID: {album.uid}) 为空或没有可访问的照片。")
-                logger.info(f"相册 '{album.name}' (ID: {album.uid}) 为空或没有可访问的照片。")
-                break
-
-            photo_list_data = api_data_section.get("photoList")
-            if not photo_list_data:
-                if (
-                    photos_in_page == 0 and page_start > 0
-                ):
-                    self._emit_log(
-                        f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。"
-                    )
-                    logger.info(
-                        f"在相册 '{album.name}' 中，页码起点 {page_start} 之后未找到更多照片。"
-                    )
-                elif photos_in_page == 0 and page_start == 0:
-                    self._emit_log(f"在相册 '{album.name}' 的第一页未找到照片。")
-                    logger.info(f"在相册 '{album.name}' 的第一页未找到照片。")
-                break
-
-            for photo_data in photo_list_data:
-                if self.is_stopped_func():
-                    self._emit_log(f"[停止] 照片获取任务已停止，跳过相册 '{album.name}' 中的剩余照片。")
-                    logger.info(f"[停止] 照片获取任务已停止，跳过相册 '{album.name}' 中的剩余照片。")
-                    return photos
-                pic_url = (
-                    photo_data.get("raw")
-                    or photo_data.get("origin_url")
-                    or photo_data.get("url")
-                    or photo_data.get("custom_url")
-                )
-                if not pic_url and "lloc" in photo_data:
-                    pic_url = photo_data["lloc"]
-                if not pic_url and "sloc" in photo_data:
-                    pic_url = photo_data["sloc"]
-
-                if not pic_url:
-                    if APP_CONFIG["is_api_debug"]:
-                        self._emit_log(
-                            f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}"
-                        )
-                        logger.debug(
-                            f"跳过没有 URL 的照片: {photo_data.get('name')}, 数据: {photo_data}"
-                        )
-                    continue
-
-                # 获取pic_key（用于视频详情查询）
-                pic_key = photo_data.get("lloc") or photo_data.get("sloc") or ""
-
-                photos.append(
-                    QzonePhoto(
-                        url=pic_url,
-                        name=photo_data.get(
-                            "name", "untitled"
-                        ).strip(),
-                        album_name=album.name,
-                        is_video=bool(
-                            photo_data.get("is_video", False)
-                            or photo_data.get("phototype") == "video"
-                        ),
-                        pic_key=pic_key,
-                        exif_data=photo_data.get("exif", {}),
-                        shoottime=photo_data.get("rawshoottime", ""),
-                        uploadtime=photo_data.get("uploadtime", ""),
-                        cameratype=photo_data.get("cameratype", "").strip(),
-                    )
-                )
-
-            if len(photos) >= total_in_album:
-                break
-            if photos_in_page == 0:
-                break
-
-            page_start += photos_in_page
-
-        return photos
-
-    def download_all_photos_for_user(self, dest_user_qq: str, progress_signal):
-        """下载目标用户所有可访问的照片。"""
-        albums = self.get_albums_by_page(dest_user_qq)
-        if not albums:
-            self._emit_log(f"未找到用户 {dest_user_qq} 的相册或无法访问。")
-            logger.info(f"未找到用户 {dest_user_qq} 的相册或无法访问。")
-            progress_signal.emit(0)  # type: ignore
-            return
-
-        self._emit_log(f"为用户 {dest_user_qq} 找到 {len(albums)} 个相册:")
-        logger.info(f"为用户 {dest_user_qq} 找到 {len(albums)} 个相册:")
-        for i, album_item in enumerate(albums):
-            self._emit_log(
-                f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})"
-            )
-            logger.info(
-                f"  {i+1}. {album_item.name} (ID: {album_item.uid}, 照片数量: {album_item.count})"
-            )
-
-        all_photo_tasks = []
-        user_save_dir = get_save_directory(dest_user_qq)
-        if not os.path.exists(user_save_dir):
-            os.makedirs(user_save_dir, exist_ok=True)
-
-        for album_index, album in enumerate(albums):
-            if self.is_stopped_func():
-                self._emit_log(f"[停止] 相册处理任务已停止，跳过后续相册。")
-                logger.info(f"[停止] 相册处理任务已停止，跳过后续相册。")
-                break
-
-            if album.name in APP_CONFIG["exclude_albums"]:
-                self._emit_log(f"跳过排除的相册: '{album.name}'")
-                logger.info(f"跳过排除的相册: '{album.name}'")
-                continue
-
-            album_path = os.path.join(
-                user_save_dir,
-                sanitize_filename_component(
-                    album.name.strip(),
-                ),
-            )
-            if not os.path.exists(album_path):
-                try:
-                    os.makedirs(album_path, exist_ok=True)
-                except OSError as e:
-                    self._emit_log(f"为相册 '{album.name}' 创建目录时出错: {e}。跳过此相册。")
-                    logger.error(f"为相册 '{album.name}' 创建目录时出错: {e}。跳过此相册。")
-                    continue
-
-            self._emit_log(f"\n正在获取相册 '{album.name}' 的照片 (预计 {album.count} 张)...")
-            logger.info(f"\n正在获取相册 '{album.name}' 的照片 (预计 {album.count} 张)...")
-            photos_in_album = self.get_photos_from_album(dest_user_qq, album)
-            self._emit_log(
-                f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。"
-            )
-            logger.info(
-                f"为相册 '{album.name}' 找到 {len(photos_in_album)} 个照片条目。准备下载。"
-            )
-
-            for photo_idx, photo_item in enumerate(photos_in_album):
-                if self.is_stopped_func():
-                    self._emit_log(f"[停止] 照片任务添加已停止，跳过相册 '{album.name}' 中的剩余照片。")
-                    logger.info(f"[停止] 照片任务添加已停止，跳过相册 '{album.name}' 中的剩余照片。")
-                    break
-
-                all_photo_tasks.append(
-                    (
-                        dict(self.cookies),
-                        dest_user_qq,
-                        album_index,
-                        album.name,
-                        photo_idx,
-                        photo_item,
-                        self.log_signal,
-                        progress_signal,
-                        self.is_stopped_func,
-                        self,  # 传递qzone_manager实例，用于调用get_video_download_url
-                        album.uid,  # 传递相册ID
-                        dest_user_qq  # 传递目标用户QQ
-                    )
-                )
-
-        if not all_photo_tasks:
-            self._emit_log(f"没有为用户 {dest_user_qq} 下载的照片。")
-            logger.info(f"没有为用户 {dest_user_qq} 下载的照片。")
-            progress_signal.emit(0)  # type: ignore
-            return
-
-        self._emit_log(
-            f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程..."
-        )
-        logger.info(
-            f"\n开始下载 {len(all_photo_tasks)} 张照片，使用 {APP_CONFIG['max_workers']} 个线程..."
-        )
-        progress_signal.emit(-len(all_photo_tasks))  # type: ignore
-
-        with ThreadPoolExecutor(max_workers=APP_CONFIG["max_workers"]) as executor:
-            list(executor.map(save_photo_worker, all_photo_tasks))
-
-        if not self.is_stopped_func():
-            self._emit_log(f"\n完成处理用户 {dest_user_qq} 的所有照片。")
-            logger.info(f"\n完成处理用户 {dest_user_qq} 的所有照片。")
+class GuiLogHandler(logging.Handler):
+    """将 logging 日志消息通过队列安全地追加到 QTextEdit。"""
+
+    def __init__(self, text_widget: QTextEdit):
+        super().__init__()
+        self.text_widget = text_widget
+        self._queue: list[str] = []
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._flush)
+        self._timer.start(100)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._queue.append(self.format(record))
+
+    def _flush(self) -> None:
+        while self._queue:
+            msg = self._queue.pop(0)
+            self.text_widget.append(msg)
+            sb = self.text_widget.verticalScrollBar()
+            if sb:
+                sb.setValue(sb.maximum())
+
+
+# ---------------------------------------------------------------------------
+# DownloadWorker：后台下载线程
+# ---------------------------------------------------------------------------
 
 
 class DownloadWorker(QThread):
-    """
-    一个 QThread 工作线程，用于在后台运行 QQ 空间照片下载过程。
-    发出信号以进行日志记录和进度更新。
-    """
+    """在后台线程运行 QQ 空间照片下载，通过信号与 GUI 通信。"""
+
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(str)
 
-    def __init__(self, main_user_qq: str, main_user_pass: str, dest_users_qq: list):
-        """
-        初始化 DownloadWorker。
-        """
+    def __init__(self, main_user_qq: str, dest_users_qq: list):
         super().__init__()
         self.main_user_qq = main_user_qq
         self.dest_users_qq = dest_users_qq
-        self.qzone_manager = None
+        self.qzone_manager: QzonePhotoManager | None = None
         self._is_stopped = False
-        # 保存上一次使用的QzonePhotoManager实例，用于复用cookie
-        self.previous_qzone_manager = None
+        # 保存上一次的 QzonePhotoManager 实例，用于复用 cookie
+        self.previous_qzone_manager: QzonePhotoManager | None = None
 
-    def stop(self):
+    def stop(self) -> None:
         """设置停止标志，请求线程停止。"""
         self._is_stopped = True
         logger.info("下载工作线程收到停止请求。")
 
-    def is_stopped(self):
-        """检查线程是否已收到停止请求。"""
+    def is_stopped(self) -> bool:
         return self._is_stopped
 
-    def run(self):
-        """线程的主要执行方法。"""
+    def run(self) -> None:
+        """线程主体。"""
         final_status = "All"
         had_error = False
         try:
             self.log_signal.emit("正在初始化下载管理器并尝试登录...")
 
-            # 检查是否可以复用之前的cookie
             reuse_cookie = False
-            if (self.previous_qzone_manager and
-                self.previous_qzone_manager.user_qq == self.main_user_qq and
-                self.previous_qzone_manager.cookies):
-
-                self.log_signal.emit("检测到已存在的登录信息，正在验证cookie有效性...")
+            if (
+                self.previous_qzone_manager
+                and self.previous_qzone_manager.user_qq == self.main_user_qq
+                and self.previous_qzone_manager.cookies
+            ):
+                self.log_signal.emit("检测到已存在的登录信息，正在验证 cookie 有效性...")
                 if self.previous_qzone_manager._check_cookie_validity():
-                    # 复用之前的QzonePhotoManager
-                    self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
+                    self.qzone_manager = QzonePhotoManager(
+                        self.main_user_qq, self.log_signal, self.is_stopped
+                    )
                     self.qzone_manager._set_cookies_and_gtk(
                         self.previous_qzone_manager.cookies,
-                        str(self.previous_qzone_manager.qzone_g_tk)  # 确保g_tk是字符串类型
+                        str(self.previous_qzone_manager.qzone_g_tk),
                     )
                     reuse_cookie = True
-                    self.log_signal.emit("之前的cookie仍然有效，直接使用。")
+                    self.log_signal.emit("之前的 cookie 仍然有效，直接使用。")
                 else:
-                    self.log_signal.emit("之前的cookie已失效，需要重新登录。")
+                    self.log_signal.emit("之前的 cookie 已失效，需要重新登录。")
 
-            # 如果不能复用cookie，则创建新的QzonePhotoManager并登录
             if not reuse_cookie:
-                self.qzone_manager = QzonePhotoManager(self.main_user_qq, self.log_signal, self.is_stopped)
+                self.qzone_manager = QzonePhotoManager(
+                    self.main_user_qq, self.log_signal, self.is_stopped
+                )
                 if not self.is_stopped():
                     self.qzone_manager._login_and_get_cookies()
 
@@ -1420,15 +174,19 @@ class DownloadWorker(QThread):
 
             for target_qq in self.dest_users_qq:
                 if self.is_stopped():
-                    self.log_signal.emit(f"下载任务已停止，跳过用户 {target_qq} 及后续用户。")
-                    logger.info(f"下载任务已停止，跳过用户 {target_qq} 及后续用户。")
+                    self.log_signal.emit(
+                        f"下载任务已停止，跳过用户 {target_qq} 及后续用户。"
+                    )
                     break
 
                 target_qq_str = str(target_qq)
                 self.log_signal.emit(f"\n--- 正在处理用户: {target_qq_str} ---")
                 try:
-                    if self.qzone_manager:  # 确保qzone_manager不为None
-                        self.qzone_manager.download_all_photos_for_user(target_qq_str, self.progress_signal)
+                    if self.qzone_manager:
+                        self.qzone_manager.download_all_photos_for_user(
+                            target_qq_str,
+                            progress_func=self.progress_signal.emit,
+                        )
                 except Exception as e:
                     had_error = True
                     self.log_signal.emit(f"处理用户 {target_qq_str} 时发生意外错误: {e}")
@@ -1456,32 +214,40 @@ class DownloadWorker(QThread):
             self.log_signal.emit(traceback.format_exc())
             logger.exception("下载过程中发生关键错误。")
         finally:
-            # 保存当前的QzonePhotoManager实例，供下次使用
             if self.qzone_manager:
                 self.previous_qzone_manager = self.qzone_manager
             self.finished_signal.emit(final_status)
+
+
+# ---------------------------------------------------------------------------
+# QzoneDownloaderGUI：主窗口
+# ---------------------------------------------------------------------------
 
 
 class QzoneDownloaderGUI(QWidget):
     """QQ 空间照片下载器的主 GUI 应用程序。"""
 
     def __init__(self):
-        """初始化 GUI 应用程序。"""
         super().__init__()
         self.setWindowTitle("QQ 空间照片下载器")
         self.setGeometry(100, 100, 800, 600)
 
-        self.worker_thread = None
+        self.worker_thread: DownloadWorker | None = None
         self.total_photos_to_download = 0
         self.downloaded_photos_count = 0
 
-        self.init_ui()
-        self.load_initial_config_to_ui()
+        self._init_ui()
+        self._load_initial_config_to_ui()
 
-    def init_ui(self):
+        # 将 logger 的输出路由到 GUI 的 log_output 控件
+        self._gui_log_handler = GuiLogHandler(self.log_output)
+        self._gui_log_handler.setFormatter(_formatter)
+        logger.addHandler(self._gui_log_handler)
+        core.logger.addHandler(self._gui_log_handler)
+
+    def _init_ui(self) -> None:
         """初始化用户界面。"""
         main_layout = QVBoxLayout()
-
         input_layout = QVBoxLayout()
 
         self.main_qq_label = QLabel("主QQ号 (用于登录):")
@@ -1501,7 +267,7 @@ class QzoneDownloaderGUI(QWidget):
         self.download_path_input = QLineEdit()
         self.download_path_input.setReadOnly(True)
         self.download_path_button = QPushButton("选择目录")
-        self.download_path_button.clicked.connect(self.select_download_path)
+        self.download_path_button.clicked.connect(self._select_download_path)
         download_path_layout.addWidget(self.download_path_label)
         download_path_layout.addWidget(self.download_path_input)
         download_path_layout.addWidget(self.download_path_button)
@@ -1517,11 +283,10 @@ class QzoneDownloaderGUI(QWidget):
 
         button_layout = QHBoxLayout()
         self.start_button = QPushButton("开始下载")
-        self.start_button.clicked.connect(self.start_download)
+        self.start_button.clicked.connect(self._start_download)
         self.stop_button = QPushButton("停止下载")
-        self.stop_button.clicked.connect(self.stop_download)
+        self.stop_button.clicked.connect(self._stop_download)
         self.stop_button.setEnabled(False)
-
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
         main_layout.addLayout(button_layout)
@@ -1533,72 +298,56 @@ class QzoneDownloaderGUI(QWidget):
 
         self.setLayout(main_layout)
 
-    def load_initial_config_to_ui(self):
+    def _load_initial_config_to_ui(self) -> None:
         """将配置值加载到 UI 字段中。"""
         self.main_qq_input.setText(USER_CONFIG.get("main_user_qq", ""))
-        self.dest_qq_input.setText(",".join(USER_CONFIG.get("dest_users_qq", [])))
-        self.download_path_input.setText(os.path.join(get_script_directory(), APP_CONFIG.get("download_path", "qzone_photo")))
+        self.dest_qq_input.setText(",".join(str(q) for q in USER_CONFIG.get("dest_users_qq", [])))
+        self.download_path_input.setText(
+            os.path.join(get_script_directory(), APP_CONFIG.get("download_path", "qzone_photo"))
+        )
 
-
-    def select_download_path(self):
+    def _select_download_path(self) -> None:
         """打开目录对话框以选择下载路径。"""
-        current_path = self.download_path_input.text()
-        if not current_path:
-            current_path = get_script_directory()
-
-        dir_dialog = QFileDialog(self)
-        dir_dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dir_dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dir_dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        selected_dir = dir_dialog.getExistingDirectory(self, "选择下载目录", current_path)
-
+        current_path = self.download_path_input.text() or get_script_directory()
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择下载目录",
+            current_path,
+            QFileDialog.Option.ShowDirsOnly,
+        )
         if selected_dir:
             self.download_path_input.setText(selected_dir)
-            relative_path = os.path.relpath(selected_dir, get_script_directory())
-            APP_CONFIG["download_path"] = relative_path
+            APP_CONFIG["download_path"] = os.path.relpath(selected_dir, get_script_directory())
 
-
-    def start_download(self):
+    def _start_download(self) -> None:
         """在单独的线程中启动下载过程。"""
         main_qq = self.main_qq_input.text().strip()
-        main_pass = USER_CONFIG.get("main_user_pass", "")
         dest_qqs_str = self.dest_qq_input.text().strip()
         download_path = self.download_path_input.text().strip()
 
         if main_qq == "123456":
             QMessageBox.warning(self, "输入错误", "主QQ号错误，请输入您的QQ号。")
-            logger.warning("用户输入错误：用户未输入自己的QQ号。")
             return
         if not main_qq or not dest_qqs_str:
             QMessageBox.warning(self, "输入错误", "主QQ号和目标QQ号不能为空。")
-            logger.warning("用户输入错误：主QQ号或目标QQ号为空。")
             return
         if not download_path:
-            QMessageBox.warning(self.main_qq_input, "输入错误", "下载路径不能为空。")
-            logger.warning("用户输入错误：下载路径为空。")
+            QMessageBox.warning(self, "输入错误", "下载路径不能为空。")
             return
 
-        try:
-            dest_qqs = [qq.strip() for qq in dest_qqs_str.split(",") if qq.strip()]
-        except Exception as e:
-            QMessageBox.warning(self.main_qq_input, "输入错误", "目标QQ号格式不正确。请用逗号分隔。")
-            logger.warning(f"用户输入错误：目标QQ号格式不正确。错误：{e}")
-            return
-
+        dest_qqs = [qq.strip() for qq in dest_qqs_str.split(",") if qq.strip()]
         if not dest_qqs:
-            QMessageBox.warning(self.main_qq_input, "输入错误", "目标QQ号列表不能为空。")
-            logger.warning("用户输入错误：目标QQ号列表为空。")
+            QMessageBox.warning(self, "输入错误", "目标QQ号列表不能为空。")
             return
 
         USER_CONFIG["main_user_qq"] = main_qq
-        USER_CONFIG["main_user_pass"] = main_pass
         USER_CONFIG["dest_users_qq"] = dest_qqs
         APP_CONFIG["download_path"] = os.path.relpath(download_path, get_script_directory())
 
         try:
             updated_config = {
                 "main_user_qq": USER_CONFIG["main_user_qq"],
-                "main_user_pass": USER_CONFIG["main_user_pass"],
+                "main_user_pass": USER_CONFIG.get("main_user_pass", ""),
                 "dest_users_qq": USER_CONFIG["dest_users_qq"],
                 "max_workers": APP_CONFIG["max_workers"],
                 "timeout_init": APP_CONFIG["timeout_init"],
@@ -1623,20 +372,18 @@ class QzoneDownloaderGUI(QWidget):
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-
         self.log_output.append("开始下载任务...")
         logger.info("开始下载任务...")
 
-        # 传递previous_qzone_manager给新的DownloadWorker实例
-        previous_qzone_manager = self.worker_thread.previous_qzone_manager if self.worker_thread else None
-        self.worker_thread = DownloadWorker(main_qq, main_pass, dest_qqs)
-        self.worker_thread.previous_qzone_manager = previous_qzone_manager
-        self.worker_thread.log_signal.connect(self.update_log)
-        self.worker_thread.progress_signal.connect(self.update_progress)
-        self.worker_thread.finished_signal.connect(self.on_download_finished)
+        previous_manager = self.worker_thread.previous_qzone_manager if self.worker_thread else None
+        self.worker_thread = DownloadWorker(main_qq, dest_qqs)
+        self.worker_thread.previous_qzone_manager = previous_manager
+        self.worker_thread.log_signal.connect(self._update_log)
+        self.worker_thread.progress_signal.connect(self._update_progress)
+        self.worker_thread.finished_signal.connect(self._on_download_finished)
         self.worker_thread.start()
 
-    def stop_download(self):
+    def _stop_download(self) -> None:
         """尝试停止正在进行的下载过程。"""
         if self.worker_thread and self.worker_thread.isRunning():
             self.worker_thread.stop()
@@ -1647,20 +394,18 @@ class QzoneDownloaderGUI(QWidget):
             self.progress_bar.setFormat("停止中...")
         else:
             self.log_output.append("没有正在运行的下载任务。")
-            logger.info("没有正在运行的下载任务。")
 
-    def update_log(self, message: str):
-        """将消息附加到日志输出区域。"""
+    def _update_log(self, message: str) -> None:
+        """将消息追加到日志输出区域。"""
         self.log_output.append(message)
-        scrollbar = self.log_output.verticalScrollBar()
-        if scrollbar:
-            scrollbar.setValue(scrollbar.maximum())
+        sb = self.log_output.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
 
-    def update_progress(self, value: int):
+    def _update_progress(self, value: int) -> None:
         """
         更新进度条。
-        如果值为负数，表示任务总数。
-        如果值为正数（1），表示一个任务已完成。
+        负数表示任务总量；正数 1 表示完成一个任务。
         """
         if value < 0:
             self.total_photos_to_download = abs(value)
@@ -1669,61 +414,48 @@ class QzoneDownloaderGUI(QWidget):
         elif value == 1:
             self.downloaded_photos_count += 1
             if self.total_photos_to_download > 0:
-                percentage = (self.downloaded_photos_count / self.total_photos_to_download) * 100
+                pct = (self.downloaded_photos_count / self.total_photos_to_download) * 100
                 self.progress_bar.setValue(self.downloaded_photos_count)
-                self.progress_bar.setFormat(f"已下载 {self.downloaded_photos_count} / {self.total_photos_to_download} ({percentage:.1f}%)")
+                self.progress_bar.setFormat(
+                    f"已下载 {self.downloaded_photos_count} / "
+                    f"{self.total_photos_to_download} ({pct:.1f}%)"
+                )
             else:
                 self.progress_bar.setFormat(f"已下载 {self.downloaded_photos_count} 张照片")
 
-
-    def on_download_finished(self, user_qq_or_all: str):
+    def _on_download_finished(self, status: str) -> None:
         """当用户下载完成或所有任务完成时调用。"""
-        if user_qq_or_all == "All":
+        if status == "All":
             self.log_output.append("所有下载任务已完成。")
             logger.info("所有下载任务已完成。")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setFormat("完成")
             self.progress_bar.setValue(self.progress_bar.maximum())
-        elif user_qq_or_all == "Stopped":
+        elif status == "Stopped":
             self.log_output.append("下载任务已停止。")
             logger.info("下载任务已停止。")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setFormat("已停止")
-        elif user_qq_or_all == "Error":
+        elif status == "Error":
             self.log_output.append("下载过程中出现错误，请查看日志。")
             logger.warning("下载过程中出现错误，请查看日志。")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setFormat("出错")
         else:
-            self.log_output.append(f"用户 {user_qq_or_all} 的照片下载完成。")
-            logger.info(f"用户 {user_qq_or_all} 的照片下载完成。")
+            self.log_output.append(f"用户 {status} 的照片下载完成。")
+            logger.info(f"用户 {status} 的照片下载完成。")
 
-class GuiLogHandler(logging.Handler):
-    """一个自定义的日志处理器，用于将日志消息发送到 PyQt 的 QTextEdit 控件。"""
-    def __init__(self, text_widget):
-        super().__init__()
-        self.text_widget = text_widget
-        self.queue = []
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.process_queue)
-        self.timer.start(100)
 
-    def emit(self, record):
-        """处理日志记录并将其添加到队列中。"""
-        msg = self.format(record)
-        self.queue.append(msg)
-
-    def process_queue(self):
-        """从队列中获取消息并将其添加到 QTextEdit 中。"""
-        while self.queue:
-            message = self.queue.pop(0)
-            self.text_widget.append(message)
-            self.text_widget.verticalScrollBar().setValue(self.text_widget.verticalScrollBar().maximum())
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    load_config(exit_on_error=True)
+
     app = QApplication(sys.argv)
     gui = QzoneDownloaderGUI()
     gui.show()
