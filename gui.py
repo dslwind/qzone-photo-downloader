@@ -353,8 +353,8 @@ class QzoneDownloaderGUI(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
     )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         dest_qqs = [qq.strip() for qq in dest_qqs_str.split(",") if qq.strip()]
         if not dest_qqs:
