@@ -113,10 +113,11 @@ class DownloadWorker(QThread):
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(str)
 
-    def __init__(self, main_user_qq: str, dest_users_qq: list):
+    def __init__(self, main_user_qq: str, dest_users_qq: list, target_album: str = ""):
         super().__init__()
         self.main_user_qq = main_user_qq
         self.dest_users_qq = dest_users_qq
+        self.target_album = target_album
         self.qzone_manager: QzonePhotoManager | None = None
         self._is_stopped = False
         # 保存上一次的 QzonePhotoManager 实例，用于复用 cookie
@@ -146,7 +147,7 @@ class DownloadWorker(QThread):
                 self.log_signal.emit("检测到已存在的登录信息，正在验证 cookie 有效性...")
                 if self.previous_qzone_manager._check_cookie_validity():
                     self.qzone_manager = QzonePhotoManager(
-                        self.main_user_qq, self.log_signal, self.is_stopped
+                        self.main_user_qq, self.log_signal, self.is_stopped, self.target_album,
                     )
                     self.qzone_manager._set_cookies_and_gtk(
                         self.previous_qzone_manager.cookies,
@@ -159,7 +160,7 @@ class DownloadWorker(QThread):
 
             if not reuse_cookie:
                 self.qzone_manager = QzonePhotoManager(
-                    self.main_user_qq, self.log_signal, self.is_stopped
+                    self.main_user_qq, self.log_signal, self.is_stopped, self.target_album,
                 )
                 if not self.is_stopped():
                     self.qzone_manager._login_and_get_cookies()
@@ -333,6 +334,7 @@ class QzoneDownloaderGUI(QWidget):
         main_qq = self.main_qq_input.text().strip()
         dest_qqs_str = self.dest_qq_input.text().strip()
         download_path = self.download_path_input.text().strip()
+        target_album = self.target_album_input.text().strip()
 
         if main_qq == "123456":
             QMessageBox.warning(self, "输入错误", "主QQ号错误，请输入您的QQ号。")
@@ -385,7 +387,7 @@ class QzoneDownloaderGUI(QWidget):
         logger.info("开始下载任务...")
 
         previous_manager = self.worker_thread.previous_qzone_manager if self.worker_thread else None
-        self.worker_thread = DownloadWorker(main_qq, dest_qqs)
+        self.worker_thread = DownloadWorker(main_qq, dest_qqs, target_album)
         self.worker_thread.previous_qzone_manager = previous_manager
         self.worker_thread.log_signal.connect(self._update_log)
         self.worker_thread.progress_signal.connect(self._update_progress)
