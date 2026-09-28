@@ -633,7 +633,7 @@ class QzonePhotoManager:
         "&need_private_comment=1&prevNum=9&postNum=18"
     )
 
-    def __init__(self, user_qq: str, log_signal=None, is_stopped_func=None):
+    def __init__(self, user_qq: str, log_signal=None, is_stopped_func=None, target_album: str = ""):
         """
         初始化 QzonePhotoManager。
 
@@ -641,8 +641,10 @@ class QzonePhotoManager:
             user_qq:         登录用户的 QQ 号
             log_signal:      可选，PyQt signal（有 .emit(str) 方法），用于 GUI 日志输出
             is_stopped_func: 可选，无参可调用对象，返回 True 时中断操作
+            target_album:       可选，只下载指定名称的相册；留空则不限制
         """
         self.user_qq = str(user_qq)
+        self.target_album = target_album.strip()
         self.cookies: dict = {}
         self.session = requests.Session()
         self.qzone_g_tk = ""
@@ -1184,7 +1186,7 @@ class QzonePhotoManager:
                 self._emit_log(f"跳过排除的相册: '{album.name}'")
                 continue
                 
-            if album.name != "东望3":
+            if self.target_album and album.name != self.target_album:
                 self._emit_log(f"跳过非目标相册: '{album.name}'")
                 continue
 
