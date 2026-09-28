@@ -267,7 +267,7 @@ class QzoneDownloaderGUI(QWidget):
         # 指定相册
         self.target_album_label = QLabel("指定相册名称:")
         self.target_album_input = QLineEdit()
-        self.target_album_input.setPlaceholderText("例如：东望")
+        self.target_album_input.setPlaceholderText("请输入要下载的相册名称")
 
         input_layout.addWidget(self.target_album_label)
         input_layout.addWidget(self.target_album_input)
