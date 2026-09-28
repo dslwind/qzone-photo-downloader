@@ -259,8 +259,17 @@ class QzoneDownloaderGUI(QWidget):
         self.dest_qq_label = QLabel("目标QQ号 (多个用逗号分隔):")
         self.dest_qq_input = QLineEdit()
         self.dest_qq_input.setPlaceholderText("请输入要下载的QQ号码，例如: 123456,789012")
+        
         input_layout.addWidget(self.dest_qq_label)
         input_layout.addWidget(self.dest_qq_input)
+
+        # 指定相册
+        self.target_album_label = QLabel("指定相册名称:")
+        self.target_album_input = QLineEdit()
+        self.target_album_input.setPlaceholderText("例如：东望")
+
+        input_layout.addWidget(self.target_album_label)
+        input_layout.addWidget(self.target_album_input)
 
         download_path_layout = QHBoxLayout()
         self.download_path_label = QLabel("下载路径:")
