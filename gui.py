@@ -345,6 +345,16 @@ class QzoneDownloaderGUI(QWidget):
         if not download_path:
             QMessageBox.warning(self, "输入错误", "下载路径不能为空。")
             return
+        if not target_album:
+            reply = QMessageBox.question(
+            self,
+            "确认下载全部相册",
+            "未指定相册名称，将下载全部相册。\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+    )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
         dest_qqs = [qq.strip() for qq in dest_qqs_str.split(",") if qq.strip()]
         if not dest_qqs:
